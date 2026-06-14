@@ -1246,6 +1246,7 @@ dependencies = [
  "prompt_store",
  "serde",
  "serde_json",
+ "zed-reqwest",
 ]
 
 [[package]]

@@ -7,8 +7,11 @@
 
 mod config;
 pub mod context;
+pub mod local_mlx;
+pub mod routing;
 
 pub use config::AutoPromptConfig;
+pub use config::{CloudFallbackConfig, LocalRoutingConfig, OrchestrationProvider, TierConfig};
 pub use context::{AutoPromptContext, AutoPromptResponse, PlanFileContent, StopPhase};
 
 use acp::schema::{SessionId, StopReason};
@@ -793,8 +796,7 @@ pub async fn decide_with_llm(
         data.session_id
     );
 
-    let result =
-        call_language_model(&data.model, &data.system_prompt, &data.context_json, cx).await;
+    let result = routing::route_and_call(&data, cx).await;
 
     log::info!(
         "[auto_prompt::decide_with_llm] LLM call completed with result: {:?}",
@@ -1927,7 +1929,7 @@ fn read_doc_files(thread: &acp_thread::AcpThread) -> Vec<PlanFileContent> {
     doc_files
 }
 
-async fn call_language_model(
+pub(crate) async fn call_language_model(
     model: &Arc<dyn LanguageModel>,
     system_prompt: &str,
     context_json: &str,
@@ -2103,7 +2105,7 @@ async fn call_language_model(
     }
 }
 
-fn parse_response(text: &str) -> anyhow::Result<AutoPromptResponse> {
+pub(crate) fn parse_response(text: &str) -> anyhow::Result<AutoPromptResponse> {
     let json_str = extract_json(text);
     match serde_json::from_str(json_str) {
         Ok(response) => Ok(response),
