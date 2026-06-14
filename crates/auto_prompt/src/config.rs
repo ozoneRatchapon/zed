@@ -83,6 +83,13 @@ pub struct AutoPromptConfig {
     /// genuinely stalled streams, and a total backstop bounds runaway streams.
     #[serde(default)]
     pub call_timeouts: CallTimeouts,
+
+    /// Char-length threshold above which the primary decision call switches from
+    /// the full serialized context to a lightweight summary (Plan 010). ~4
+    /// chars/token, so 120_000 ≈ 30K tokens. Overridable via
+    /// `ZED_AUTO_PROMPT_LIGHTWEIGHT_CONTEXT_THRESHOLD_CHARS`.
+    #[serde(default = "default_lightweight_context_threshold_chars")]
+    pub lightweight_context_threshold_chars: usize,
 }
 
 // ── Tiered routing types ─────────────────────────────────────────────────────
@@ -340,6 +347,10 @@ fn default_call_timeout_total_secs() -> u64 {
     300
 }
 
+fn default_lightweight_context_threshold_chars() -> usize {
+    120_000
+}
+
 impl Default for AutoPromptConfig {
     fn default() -> Self {
         Self {
@@ -356,6 +367,7 @@ impl Default for AutoPromptConfig {
             local_routing: None,
             verdict_log_path: None,
             call_timeouts: CallTimeouts::default(),
+            lightweight_context_threshold_chars: default_lightweight_context_threshold_chars(),
         }
     }
 }
@@ -477,6 +489,12 @@ impl AutoPromptConfig {
             .ok()
             .map(PathBuf::from);
 
+        let lightweight_context_threshold_chars =
+            std::env::var("ZED_AUTO_PROMPT_LIGHTWEIGHT_CONTEXT_THRESHOLD_CHARS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_lightweight_context_threshold_chars);
+
         let call_timeouts = CallTimeouts {
             first_token_secs: std::env::var("ZED_AUTO_PROMPT_CALL_TIMEOUT_FIRST_TOKEN_SECS")
                 .ok()
@@ -506,6 +524,7 @@ impl AutoPromptConfig {
             local_routing: None,
             verdict_log_path,
             call_timeouts,
+            lightweight_context_threshold_chars,
         }
     }
 

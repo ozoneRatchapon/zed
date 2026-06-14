@@ -145,7 +145,7 @@ async fn try_tier(
         &tier_cfg.endpoint,
         &tier_cfg.model,
         &data.system_prompt,
-        &data.context_json,
+        data.primary_context.sent_str(&data.context_json),
         tier_cfg.timeout_ms,
     )
     .await;
@@ -200,7 +200,7 @@ async fn cloud_call(data: &LlmCallData, cx: &AsyncApp) -> Result<(String, AutoPr
     call_language_model(
         &data.model,
         &data.system_prompt,
-        &data.context_json,
+        data.primary_context.sent_str(&data.context_json),
         &data.call_timeouts,
         cx,
     )

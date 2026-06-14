@@ -331,6 +331,39 @@ pub enum AutoPromptDecision {
 
 /// Data needed for the async LLM call path.
 #[derive(Clone)]
+/// The context payload sent to the model for the primary decision call.
+///
+/// Plan 010: when the serialized context exceeds the configured char threshold,
+/// the full `AutoPromptContext` JSON is replaced by a lightweight summary so the
+/// model only receives what it needs for the continue/stop verdict (last assistant
+/// message + plan landscape), not the whole thread. Below the threshold the full
+/// context is sent unchanged.
+#[derive(Debug)]
+pub enum PrimaryContext {
+    /// Send the full `context_json` unchanged (normal-sized iterations).
+    Full,
+    /// Send a lightweight summary built from the full context (large iterations).
+    Lightweight(String),
+}
+
+impl PrimaryContext {
+    /// The string actually sent to the model as the user message.
+    pub fn sent_str<'a>(&'a self, full_context: &'a str) -> &'a str {
+        match self {
+            PrimaryContext::Full => full_context,
+            PrimaryContext::Lightweight(payload) => payload,
+        }
+    }
+
+    /// `"full"` or `"lightweight"` — recorded in the decision log for fidelity.
+    pub fn mode(&self) -> &'static str {
+        match self {
+            PrimaryContext::Full => "full",
+            PrimaryContext::Lightweight(_) => "lightweight",
+        }
+    }
+}
+
 pub struct LlmCallData {
     pub model: Arc<dyn LanguageModel>,
     pub system_prompt: String,
@@ -363,6 +396,12 @@ pub struct LlmCallData {
     /// Streaming-call timeout tiers (Plan 008). Two-tier per-event timeout:
     /// generous first-token window + tight per-event window + total backstop.
     pub call_timeouts: CallTimeouts,
+
+    /// Whether the primary call sends the full context or a lightweight summary
+    /// (Plan 010). Decided once in `decide()` from `context_json.len()` vs the
+    /// configured threshold; the full `context_json` is always retained here for
+    /// downstream re-parsing (`build_plan_landscape`, etc.).
+    pub primary_context: PrimaryContext,
 }
 
 impl std::fmt::Debug for LlmCallData {
@@ -392,6 +431,7 @@ impl std::fmt::Debug for LlmCallData {
             .field("had_error", &self.had_error)
             .field("stop_phase", &self.stop_phase)
             .field("call_timeouts", &self.call_timeouts)
+            .field("primary_context", &self.primary_context)
             .finish()
     }
 }
@@ -791,6 +831,13 @@ pub fn decide(
         .last_assistant_message()
         .map(|s| s.to_string());
 
+    let primary_context = select_primary_context(
+        &context_json,
+        last_assistant_message.as_deref(),
+        thread_title.as_deref(),
+        config.lightweight_context_threshold_chars,
+    );
+
     log::info!("[auto_prompt::decide] Returning NeedsLlmCall decision");
     AutoPromptDecision::NeedsLlmCall(LlmCallData {
         model,
@@ -810,6 +857,7 @@ pub fn decide(
         had_error: auto_prompt_ctx.had_error,
         stop_phase,
         call_timeouts: config.call_timeouts,
+        primary_context,
     })
 }
 
@@ -917,11 +965,12 @@ pub async fn decide_with_llm(
         data.iteration_count,
         &format!("{:?}", data.model.id()),
         &data.system_prompt,
-        &data.context_json,
+        data.primary_context.sent_str(&data.context_json),
         &raw_response,
         &response,
         data.actual_input_tokens,
         response_origin,
+        data.primary_context.mode(),
     );
 
     log::info!(
@@ -1488,6 +1537,7 @@ fn write_decision_log(
     parsed: &AutoPromptResponse,
     actual_input_tokens: Option<u64>,
     response_origin: &str,
+    context_mode: &str,
 ) {
     let logs_dir = match project_root {
         Some(root) => root.join(".logs"),
@@ -1512,6 +1562,7 @@ fn write_decision_log(
         "iteration": iteration,
         "model": model,
         "response_origin": response_origin,
+        "context_mode": context_mode,
         "request": {
             "system_prompt": system_prompt,
             "context_json": context_json,
@@ -2484,6 +2535,31 @@ fn build_plan_landscape(context_json: &str) -> Option<String> {
     }
 
     Some(lines.join("\n"))
+}
+
+/// Decide whether the primary decision call sends the full serialized context or
+/// a lightweight summary (Plan 010). Threshold is in chars (~4 chars/token), so
+/// 120_000 ≈ 30K tokens. Above the threshold the call reuses the retry-path
+/// `build_lightweight_retry_context` (last assistant paragraphs + plan landscape);
+/// below it, `Full` is returned and behavior is unchanged.
+fn select_primary_context(
+    context_json: &str,
+    last_assistant_message: Option<&str>,
+    title: Option<&str>,
+    threshold_chars: usize,
+) -> PrimaryContext {
+    if context_json.len() > threshold_chars {
+        let lightweight =
+            build_lightweight_retry_context(context_json, last_assistant_message, title);
+        let full_len = context_json.len();
+        let lw_len = lightweight.len();
+        log::info!(
+            "[auto_prompt] context_json {full_len} chars > threshold {threshold_chars} — primary call using lightweight context ({lw_len} chars)"
+        );
+        PrimaryContext::Lightweight(lightweight)
+    } else {
+        PrimaryContext::Full
+    }
 }
 
 fn build_lightweight_retry_context(
@@ -3967,6 +4043,58 @@ mod tests {
         ]}"##;
         let result = build_plan_landscape(context_json);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn select_primary_context_under_threshold_is_full() {
+        let ctx = "{\"a\":\"short\"}";
+        let pc = select_primary_context(ctx, Some("last msg"), Some("Title"), 120_000);
+        assert!(matches!(pc, PrimaryContext::Full));
+        assert_eq!(pc.mode(), "full");
+        assert_eq!(pc.sent_str(ctx), ctx);
+    }
+
+    #[test]
+    fn select_primary_context_over_threshold_is_lightweight() {
+        let big = "x".repeat(200_000);
+        let pc = select_primary_context(&big, Some("last msg"), Some("Title"), 120_000);
+        let lw = match &pc {
+            PrimaryContext::Lightweight(s) => s.clone(),
+            other => panic!("expected Lightweight, got {other:?}"),
+        };
+        assert_eq!(pc.mode(), "lightweight");
+        assert_eq!(pc.sent_str(&big), lw);
+        assert!(lw.len() < big.len());
+        assert_eq!(
+            lw,
+            build_lightweight_retry_context(&big, Some("last msg"), Some("Title"))
+        );
+    }
+
+    #[test]
+    fn select_primary_context_boundary_is_full() {
+        // `>` is strict: exactly at threshold → Full.
+        let ctx = "x".repeat(120);
+        let pc = select_primary_context(&ctx, None, None, 120);
+        assert!(matches!(pc, PrimaryContext::Full));
+    }
+
+    #[test]
+    fn select_primary_context_handles_none_messages() {
+        let big = "x".repeat(200_000);
+        let pc = select_primary_context(&big, None, None, 120_000);
+        assert!(matches!(pc, PrimaryContext::Lightweight(_)));
+    }
+
+    #[test]
+    fn primary_context_mode_and_sent_str() {
+        let full = PrimaryContext::Full;
+        assert_eq!(full.mode(), "full");
+        assert_eq!(full.sent_str("the full context"), "the full context");
+
+        let lw = PrimaryContext::Lightweight("summary".to_string());
+        assert_eq!(lw.mode(), "lightweight");
+        assert_eq!(lw.sent_str("the full context"), "summary");
     }
 
     #[test]
