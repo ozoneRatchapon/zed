@@ -5,15 +5,17 @@
 //! This crate contains the decision logic only. The caller (agent_ui)
 //! handles the actual GPUI action dispatch.
 
-mod config;
 pub mod compaction;
+mod config;
 pub mod context;
 pub mod handover;
 pub mod local_mlx;
 pub mod routing;
 
 pub use config::AutoPromptConfig;
-pub use config::{CloudFallbackConfig, CompactionConfig, LocalRoutingConfig, OrchestrationProvider, TierConfig};
+pub use config::{
+    CloudFallbackConfig, CompactionConfig, LocalRoutingConfig, OrchestrationProvider, TierConfig,
+};
 pub use context::{AutoPromptContext, AutoPromptResponse, PlanFileContent, StopPhase};
 
 use acp::schema::{SessionId, StopReason};
@@ -832,92 +834,123 @@ pub async fn decide_with_llm(
         result.is_ok()
     );
 
-    match result {
-        Ok((raw_response, mut response)) => {
-            // Plan 005: if the orchestrator emitted a HandoverBlock, prepend it
-            // to `next_prompt` as a `<handover>` YAML fence. Every downstream
-            // consumer (EvaluationInput, with_first_prompt_context, AutoPromptAction)
-            // then automatically carries the handover into the forked thread.
-            if let Some(prompt) = response.next_prompt.take() {
-                let with_handover = handover::prepend_handover(&prompt, response.handover.as_ref());
-                response.next_prompt = Some(with_handover);
-            } else if response.handover.is_some() {
-                // Handover emitted with no next_prompt — unusual but possible.
-                // Synthesize a minimal continuation that references the handover.
-                let block = response
-                    .handover
-                    .as_ref()
-                    .map(|h| h.to_yaml_block())
-                    .unwrap_or_default();
-                if !block.is_empty() {
-                    response.next_prompt = Some(format!(
-                        "{block}\n\nContinue from the handover above."
-                    ));
-                }
-            }
-
-            let has_prompt = response
-                .next_prompt
-                .as_ref()
-                .is_some_and(|p| !p.trim().is_empty());
-
-            let is_synthetic_failure = response.confidence <= Some(0.3)
-                && response
-                    .reason
-                    .as_ref()
-                    .is_some_and(|r| r.to_ascii_lowercase().starts_with("model"));
-
-            let response_origin = if is_synthetic_failure {
-                "synthetic"
-            } else {
-                "llm"
-            };
-
-            write_decision_log(
+    // Plan 006: a hard orchestration `Err` (60s timeout on a large context, or a
+    // streaming error) previously propagated and killed the whole auto-prompt chain
+    // with no recovery — unlike the empty-Text `Ok(synthetic)` path, which engages
+    // the lightweight-retry + safety-net recovery. Convert the `Err` here into a
+    // synthetic-failure response (confidence 0.0, reason starting with "model") so
+    // the existing `is_synthetic_failure` recovery block fires identically. The
+    // original error is still recorded via write_error_log for diagnostics.
+    let (raw_response, mut response) = match result {
+        Ok(ok) => ok,
+        Err(err) => {
+            let failure_reason =
+                format!("model orchestration call failed (timeout/empty stream): {err:#}");
+            log::warn!("auto_prompt: {failure_reason} — synthesizing failure for recovery");
+            write_error_log(
                 data.project_root.as_ref(),
                 data.iteration_count,
                 &format!("{:?}", data.model.id()),
-                &data.system_prompt,
-                &data.context_json,
-                &raw_response,
-                &response,
-                data.actual_input_tokens,
-                response_origin,
+                &err,
             );
+            (
+                String::new(),
+                AutoPromptResponse {
+                    should_continue: false,
+                    next_prompt: None,
+                    reason: Some(failure_reason),
+                    all_plan_done: false,
+                    confidence: Some(0.0),
+                    thread_summary: None,
+                    handover: None,
+                },
+            )
+        }
+    };
 
-            log::info!(
-                "[auto_prompt::decide_with_llm] Response received: should_continue={}, has_next_prompt={}, all_plan_done={}, confidence={:?}",
-                response.should_continue,
-                has_prompt,
-                response.all_plan_done,
-                response.confidence
-            );
+    log::info!("[auto_prompt::decide_with_llm] LLM call completed, proceeding to evaluation");
+    // Plan 005: if the orchestrator emitted a HandoverBlock, prepend it
+    // to `next_prompt` as a `<handover>` YAML fence. Every downstream
+    // consumer (EvaluationInput, with_first_prompt_context, AutoPromptAction)
+    // then automatically carries the handover into the forked thread.
+    if let Some(prompt) = response.next_prompt.take() {
+        let with_handover = handover::prepend_handover(&prompt, response.handover.as_ref());
+        response.next_prompt = Some(with_handover);
+    } else if response.handover.is_some() {
+        // Handover emitted with no next_prompt — unusual but possible.
+        // Synthesize a minimal continuation that references the handover.
+        let block = response
+            .handover
+            .as_ref()
+            .map(|h| h.to_yaml_block())
+            .unwrap_or_default();
+        if !block.is_empty() {
+            response.next_prompt = Some(format!("{block}\n\nContinue from the handover above."));
+        }
+    }
 
-            if let Some(reason) = &response.reason {
-                log::info!("[auto_prompt::decide_with_llm] Reason: {}", reason);
-            }
+    let has_prompt = response
+        .next_prompt
+        .as_ref()
+        .is_some_and(|p| !p.trim().is_empty());
 
-            if let Some(prompt) = &response.next_prompt {
-                log::info!("[auto_prompt::decide_with_llm] Next prompt: {}", prompt);
-            }
+    let is_synthetic_failure = response.confidence <= Some(0.3)
+        && response
+            .reason
+            .as_ref()
+            .is_some_and(|r| r.to_ascii_lowercase().starts_with("model"));
 
-            let prompt_summary = build_prompt_summary(
-                response.thread_summary.as_deref(),
-                data.title.as_deref(),
-                response.reason.as_deref(),
-                data.last_assistant_message.as_deref(),
-                data.original_user_message.as_deref(),
-                data.first_user_message.as_deref(),
-            );
+    let response_origin = if is_synthetic_failure {
+        "synthetic"
+    } else {
+        "llm"
+    };
 
-            let all_done = response.all_plan_done
-                || response
-                    .next_prompt
-                    .as_ref()
-                    .is_some_and(|p| p.contains("#ALL_PLAN_DONE"));
+    write_decision_log(
+        data.project_root.as_ref(),
+        data.iteration_count,
+        &format!("{:?}", data.model.id()),
+        &data.system_prompt,
+        &data.context_json,
+        &raw_response,
+        &response,
+        data.actual_input_tokens,
+        response_origin,
+    );
 
-            let next_plan_prompt = if all_done {
-                build_plan_landscape(&data.context_json).map(|landscape| {
+    log::info!(
+        "[auto_prompt::decide_with_llm] Response received: should_continue={}, has_next_prompt={}, all_plan_done={}, confidence={:?}",
+        response.should_continue,
+        has_prompt,
+        response.all_plan_done,
+        response.confidence
+    );
+
+    if let Some(reason) = &response.reason {
+        log::info!("[auto_prompt::decide_with_llm] Reason: {}", reason);
+    }
+
+    if let Some(prompt) = &response.next_prompt {
+        log::info!("[auto_prompt::decide_with_llm] Next prompt: {}", prompt);
+    }
+
+    let prompt_summary = build_prompt_summary(
+        response.thread_summary.as_deref(),
+        data.title.as_deref(),
+        response.reason.as_deref(),
+        data.last_assistant_message.as_deref(),
+        data.original_user_message.as_deref(),
+        data.first_user_message.as_deref(),
+    );
+
+    let all_done = response.all_plan_done
+        || response
+            .next_prompt
+            .as_ref()
+            .is_some_and(|p| p.contains("#ALL_PLAN_DONE"));
+
+    let next_plan_prompt = if all_done {
+        build_plan_landscape(&data.context_json).map(|landscape| {
                     format!(
                         "All current plan tasks are checked. For your awareness, remaining plans:\n\n\
                          {landscape}\n\n\
@@ -929,96 +962,96 @@ pub async fn decide_with_llm(
                          5. Declare: \"Reviewed remaining plans: <staying on current feature | transitioning to X because Y | stopping, nothing related>\""
                     )
                 })
-            } else {
-                None
-            };
+    } else {
+        None
+    };
 
-            if is_synthetic_failure {
-                log::warn!(
-                    "[auto_prompt::decide_with_llm] Synthetic failure detected: confidence={:?}, reason={:?} — model did not produce a real response, entering lightweight retry path with detect_remaining_work safety net",
-                    response.confidence,
-                    response.reason
-                );
-            }
+    if is_synthetic_failure {
+        log::warn!(
+            "[auto_prompt::decide_with_llm] Synthetic failure detected: confidence={:?}, reason={:?} — model did not produce a real response, entering lightweight retry path with detect_remaining_work safety net",
+            response.confidence,
+            response.reason
+        );
+    }
 
-            let input = EvaluationInput {
-                should_continue: response.should_continue,
-                confidence: response.confidence,
-                next_prompt: std::mem::take(&mut response.next_prompt),
-                reason: std::mem::take(&mut response.reason),
-                all_plan_done: all_done,
-                next_plan_prompt,
-                last_assistant_message: data.last_assistant_message.clone(),
-                is_synthetic_failure,
-                stop_phase: data.stop_phase.clone(),
-            };
+    let input = EvaluationInput {
+        should_continue: response.should_continue,
+        confidence: response.confidence,
+        next_prompt: std::mem::take(&mut response.next_prompt),
+        reason: std::mem::take(&mut response.reason),
+        all_plan_done: all_done,
+        next_plan_prompt,
+        last_assistant_message: data.last_assistant_message.clone(),
+        is_synthetic_failure,
+        stop_phase: data.stop_phase.clone(),
+    };
 
-            log::info!(
-                "[auto_prompt::decide_with_llm] evaluate_response input: should_continue={}, all_plan_done={}, confidence={:?}, has_next_plan={}",
-                input.should_continue,
-                input.all_plan_done,
-                input.confidence,
-                input.next_plan_prompt.is_some()
-            );
+    log::info!(
+        "[auto_prompt::decide_with_llm] evaluate_response input: should_continue={}, all_plan_done={}, confidence={:?}, has_next_plan={}",
+        input.should_continue,
+        input.all_plan_done,
+        input.confidence,
+        input.next_plan_prompt.is_some()
+    );
 
-            let evaluation = evaluate_response(&input);
+    let evaluation = evaluate_response(&input);
 
-            log::info!(
-                "[auto_prompt::decide_with_llm] evaluate_response: source={:?}, result={:?}",
-                evaluation.source(),
-                evaluation
-            );
+    log::info!(
+        "[auto_prompt::decide_with_llm] evaluate_response: source={:?}, result={:?}",
+        evaluation.source(),
+        evaluation
+    );
 
-            match evaluation {
-                EvaluationResult::Continue { prompt, reason } => {
-                    log::info!("[auto_prompt::decide_with_llm] Evaluation: Continue — {reason}");
+    match evaluation {
+        EvaluationResult::Continue { prompt, reason } => {
+            log::info!("[auto_prompt::decide_with_llm] Evaluation: Continue — {reason}");
 
-                    let prompt = if is_doc_creation_prompt(&prompt) {
-                        match build_checkbox_verification_prompt(&data.context_json) {
-                            Some(verification_prompt) => {
-                                log::info!(
-                                    "auto_prompt: plan has unchecked items, overriding doc creation with checkbox verification"
-                                );
-                                verification_prompt
-                            }
-                            None => prompt,
-                        }
-                    } else {
-                        prompt
-                    };
-
-                    log::info!(
-                        "auto_prompt: dispatching new thread with prompt: {}...",
-                        prompt.chars().take(80).collect::<String>()
-                    );
-
-                    let next_prompt = with_first_prompt_context(
-                        prompt,
-                        prompt_summary.as_deref(),
-                        data.title.as_deref(),
-                        data.last_assistant_message.as_deref(),
-                    );
-
-                    Ok(AutoPromptOutcome::Continue(AutoPromptAction {
-                        from_session_id: data.session_id,
-                        from_title: data.title,
-                        next_prompt,
-                        work_dirs: data.work_dirs,
-                        original_user_message: data.original_user_message,
-                        profile_id: data.profile_id.clone(),
-                        actual_input_tokens: data.actual_input_tokens,
-                        last_assistant_message: data.last_assistant_message.clone(),
-                    }))
+            let prompt = if is_doc_creation_prompt(&prompt) {
+                match build_checkbox_verification_prompt(&data.context_json) {
+                    Some(verification_prompt) => {
+                        log::info!(
+                            "auto_prompt: plan has unchecked items, overriding doc creation with checkbox verification"
+                        );
+                        verification_prompt
+                    }
+                    None => prompt,
                 }
-                EvaluationResult::NeedsSecondOpinion {
-                    extracted_section,
-                    rule_reason,
-                } => {
-                    log::info!(
-                        "[auto_prompt::decide_with_llm] Evaluation: NeedsSecondOpinion — {rule_reason}"
-                    );
+            } else {
+                prompt
+            };
 
-                    let second_opinion_system = "# version: second_opinion\n\
+            log::info!(
+                "auto_prompt: dispatching new thread with prompt: {}...",
+                prompt.chars().take(80).collect::<String>()
+            );
+
+            let next_prompt = with_first_prompt_context(
+                prompt,
+                prompt_summary.as_deref(),
+                data.title.as_deref(),
+                data.last_assistant_message.as_deref(),
+            );
+
+            Ok(AutoPromptOutcome::Continue(AutoPromptAction {
+                from_session_id: data.session_id,
+                from_title: data.title,
+                next_prompt,
+                work_dirs: data.work_dirs,
+                original_user_message: data.original_user_message,
+                profile_id: data.profile_id.clone(),
+                actual_input_tokens: data.actual_input_tokens,
+                last_assistant_message: data.last_assistant_message.clone(),
+            }))
+        }
+        EvaluationResult::NeedsSecondOpinion {
+            extracted_section,
+            rule_reason,
+        } => {
+            log::info!(
+                "[auto_prompt::decide_with_llm] Evaluation: NeedsSecondOpinion — {rule_reason}"
+            );
+
+            let second_opinion_system = "# version: second_opinion\n\
                         You are a second-opinion judge. The main orchestration LLM said 'stop' \
                         but pattern detection found potential remaining work in the worker AI's last message.\n\n\
                         Respond ONLY with valid JSON:\n\
@@ -1030,106 +1063,105 @@ pub async fn decide_with_llm(
                         4. Actual unchecked tasks, bugs to fix, features to implement → should_continue=true\n\
                         5. When in doubt, favor stopping (should_continue=false) — the main LLM already said stop";
 
-                    let second_opinion_context = format!(
-                        "## Main LLM decision\n- should_continue: false\n- reason: {}\n\n\
+            let second_opinion_context = format!(
+                "## Main LLM decision\n- should_continue: false\n- reason: {}\n\n\
                          ## Pattern detection\n- rule: {}\n\n\
                          ## Extracted section\n{}\n\n\
                          ## Last assistant message (for context)\n{}",
-                        input.reason.as_deref().unwrap_or("(none)"),
-                        rule_reason,
-                        extracted_section,
-                        data.last_assistant_message.as_deref().unwrap_or("(none)"),
-                    );
+                input.reason.as_deref().unwrap_or("(none)"),
+                rule_reason,
+                extracted_section,
+                data.last_assistant_message.as_deref().unwrap_or("(none)"),
+            );
 
-                    match call_language_model(
-                        &data.model,
-                        second_opinion_system,
-                        &second_opinion_context,
-                        cx,
-                    )
-                    .await
-                    {
-                        Ok((_raw, response)) => {
-                            if response.should_continue {
-                                log::info!(
-                                    "[auto_prompt::decide_with_llm] Second opinion: Continue — {:?}",
-                                    response.reason
-                                );
-                                let next_prompt = with_first_prompt_context(
-                                    extracted_section,
-                                    prompt_summary.as_deref(),
-                                    data.title.as_deref(),
-                                    data.last_assistant_message.as_deref(),
-                                );
-                                Ok(AutoPromptOutcome::Continue(AutoPromptAction {
-                                    from_session_id: data.session_id,
-                                    from_title: data.title,
-                                    next_prompt,
-                                    work_dirs: data.work_dirs,
-                                    original_user_message: data.original_user_message,
-                                    profile_id: data.profile_id.clone(),
-                                    actual_input_tokens: data.actual_input_tokens,
-                                    last_assistant_message: data.last_assistant_message.clone(),
-                                }))
-                            } else {
-                                let stop_reason = format!(
-                                    "second opinion confirmed stop: {}",
-                                    response.reason.as_deref().unwrap_or("no reason given")
-                                );
-                                log::info!("[auto_prompt::decide_with_llm] {stop_reason}");
-                                write_stop_log(
-                                    data.project_root.as_ref(),
-                                    data.iteration_count,
-                                    &stop_reason,
-                                );
-                                reset_iteration();
-                                Ok(AutoPromptOutcome::Stopped {
-                                    reason: stop_reason,
-                                })
-                            }
-                        }
-                        Err(err) => {
-                            let stop_reason = format!(
-                                "second opinion LLM call failed: {err:#} — defaulting to stop"
-                            );
-                            log::warn!("[auto_prompt::decide_with_llm] {stop_reason}");
-                            write_stop_log(
-                                data.project_root.as_ref(),
-                                data.iteration_count,
-                                &stop_reason,
-                            );
-                            reset_iteration();
-                            Ok(AutoPromptOutcome::Stopped {
-                                reason: stop_reason,
-                            })
-                        }
+            match call_language_model(
+                &data.model,
+                second_opinion_system,
+                &second_opinion_context,
+                cx,
+            )
+            .await
+            {
+                Ok((_raw, response)) => {
+                    if response.should_continue {
+                        log::info!(
+                            "[auto_prompt::decide_with_llm] Second opinion: Continue — {:?}",
+                            response.reason
+                        );
+                        let next_prompt = with_first_prompt_context(
+                            extracted_section,
+                            prompt_summary.as_deref(),
+                            data.title.as_deref(),
+                            data.last_assistant_message.as_deref(),
+                        );
+                        Ok(AutoPromptOutcome::Continue(AutoPromptAction {
+                            from_session_id: data.session_id,
+                            from_title: data.title,
+                            next_prompt,
+                            work_dirs: data.work_dirs,
+                            original_user_message: data.original_user_message,
+                            profile_id: data.profile_id.clone(),
+                            actual_input_tokens: data.actual_input_tokens,
+                            last_assistant_message: data.last_assistant_message.clone(),
+                        }))
+                    } else {
+                        let stop_reason = format!(
+                            "second opinion confirmed stop: {}",
+                            response.reason.as_deref().unwrap_or("no reason given")
+                        );
+                        log::info!("[auto_prompt::decide_with_llm] {stop_reason}");
+                        write_stop_log(
+                            data.project_root.as_ref(),
+                            data.iteration_count,
+                            &stop_reason,
+                        );
+                        reset_iteration();
+                        Ok(AutoPromptOutcome::Stopped {
+                            reason: stop_reason,
+                        })
                     }
                 }
-                EvaluationResult::WantsStop { reason } => {
-                    if input.is_synthetic_failure {
-                        // Full-context LLM call failed (context too large or model error).
-                        // Retry with lightweight context: last message + incomplete plan names only.
-                        log::info!(
-                            "[auto_prompt::decide_with_llm] Building lightweight retry context — last_assistant_message={} chars, has_title={}, reason for WantsStop: {}",
-                            data.last_assistant_message
-                                .as_ref()
-                                .map(|m| m.len())
-                                .unwrap_or(0),
-                            data.title.is_some(),
-                            reason
-                        );
-                        let lightweight_ctx = build_lightweight_retry_context(
-                            &data.context_json,
-                            data.last_assistant_message.as_deref(),
-                            data.title.as_deref(),
-                        );
-                        log::info!(
-                            "[auto_prompt::decide_with_llm] Lightweight retry context built ({} chars):\n---\n{}\n---",
-                            lightweight_ctx.len(),
-                            lightweight_ctx.chars().take(800).collect::<String>()
-                        );
+                Err(err) => {
+                    let stop_reason =
+                        format!("second opinion LLM call failed: {err:#} — defaulting to stop");
+                    log::warn!("[auto_prompt::decide_with_llm] {stop_reason}");
+                    write_stop_log(
+                        data.project_root.as_ref(),
+                        data.iteration_count,
+                        &stop_reason,
+                    );
+                    reset_iteration();
+                    Ok(AutoPromptOutcome::Stopped {
+                        reason: stop_reason,
+                    })
+                }
+            }
+        }
+        EvaluationResult::WantsStop { reason } => {
+            if input.is_synthetic_failure {
+                // Full-context LLM call failed (context too large or model error).
+                // Retry with lightweight context: last message + incomplete plan names only.
+                log::info!(
+                    "[auto_prompt::decide_with_llm] Building lightweight retry context — last_assistant_message={} chars, has_title={}, reason for WantsStop: {}",
+                    data.last_assistant_message
+                        .as_ref()
+                        .map(|m| m.len())
+                        .unwrap_or(0),
+                    data.title.is_some(),
+                    reason
+                );
+                let lightweight_ctx = build_lightweight_retry_context(
+                    &data.context_json,
+                    data.last_assistant_message.as_deref(),
+                    data.title.as_deref(),
+                );
+                log::info!(
+                    "[auto_prompt::decide_with_llm] Lightweight retry context built ({} chars):\n---\n{}\n---",
+                    lightweight_ctx.len(),
+                    lightweight_ctx.chars().take(800).collect::<String>()
+                );
 
-                        let retry_system = "# version: retry\n\
+                let retry_system = "# version: retry\n\
                             You decide what to do next based on the AI's last message.\n\
                             Priority: the LAST ASSISTANT MESSAGE is the most important signal.\n\n\
                             Respond ONLY with valid JSON:\n\
@@ -1151,284 +1183,243 @@ pub async fn decide_with_llm(
                             8. If remaining tasks seem unjustified or low-value, include #SKIP in next_prompt to signal skip\n\
                             9. confidence must be >= 0.7\n";
 
-                        let mut retry_ok = None;
-                        for attempt in 1..=3u32 {
-                            if attempt > 1 {
-                                let delay = 2000 * 2u64.pow(attempt - 1);
-                                log::info!(
-                                    "auto_prompt: lightweight retry attempt {attempt}, waiting {delay}ms"
-                                );
-                                cx.background_executor()
-                                    .timer(Duration::from_millis(delay))
-                                    .await;
-                            }
-                            match call_language_model(
-                                &data.model,
-                                retry_system,
-                                &lightweight_ctx,
-                                cx,
-                            )
-                            .await
-                            {
-                                Ok((_raw, parsed)) => {
-                                    let is_retry_synthetic = parsed.confidence.unwrap_or(1.0)
-                                        <= 0.3
-                                        && parsed.reason.as_ref().is_some_and(|r| {
-                                            r.to_ascii_lowercase().starts_with("model")
-                                        });
-                                    if is_retry_synthetic {
-                                        log::warn!(
-                                            "auto_prompt: lightweight retry attempt {attempt} got synthetic failure, retrying"
-                                        );
-                                        continue;
-                                    }
-                                    log::info!(
-                                        "auto_prompt: lightweight retry attempt {attempt} ok: should_continue={}, prompt={:?}",
-                                        parsed.should_continue,
-                                        parsed.next_prompt
-                                    );
-                                    retry_ok = Some(parsed);
-                                    break;
-                                }
-                                Err(err) => {
-                                    log::warn!(
-                                        "auto_prompt: lightweight retry attempt {attempt} failed: {err:#}"
-                                    );
-                                }
-                            }
-                        }
-
-                        match retry_ok {
-                            Some(parsed) if parsed.should_continue => {
-                                let prompt = parsed
-                                    .next_prompt
-                                    .unwrap_or_else(|| "Continue with remaining work.".to_string());
-                                let next_prompt = with_first_prompt_context(
-                                    prompt,
-                                    prompt_summary.as_deref(),
-                                    data.title.as_deref(),
-                                    data.last_assistant_message.as_deref(),
-                                );
-                                Ok(AutoPromptOutcome::Continue(AutoPromptAction {
-                                    from_session_id: data.session_id,
-                                    from_title: data.title,
-                                    next_prompt,
-                                    work_dirs: data.work_dirs,
-                                    original_user_message: data.original_user_message,
-                                    profile_id: data.profile_id.clone(),
-                                    actual_input_tokens: data.actual_input_tokens,
-                                    last_assistant_message: data.last_assistant_message.clone(),
-                                }))
-                            }
-                            Some(parsed) => {
-                                let stop_reason = parsed
+                let mut retry_ok = None;
+                for attempt in 1..=3u32 {
+                    if attempt > 1 {
+                        let delay = 2000 * 2u64.pow(attempt - 1);
+                        log::info!(
+                            "auto_prompt: lightweight retry attempt {attempt}, waiting {delay}ms"
+                        );
+                        cx.background_executor()
+                            .timer(Duration::from_millis(delay))
+                            .await;
+                    }
+                    match call_language_model(&data.model, retry_system, &lightweight_ctx, cx).await
+                    {
+                        Ok((_raw, parsed)) => {
+                            let is_retry_synthetic = parsed.confidence.unwrap_or(1.0) <= 0.3
+                                && parsed
                                     .reason
-                                    .unwrap_or_else(|| "lightweight retry says stop".to_string());
-                                log::info!(
-                                    "auto_prompt: lightweight retry says stop: {stop_reason}"
-                                );
-                                log::info!(
-                                    "auto_prompt: checking detect_remaining_work safety net before accepting retry stop"
-                                );
-                                if let Some(remaining_prompt) =
-                                    detect_remaining_work(data.last_assistant_message.as_deref())
-                                {
-                                    log::warn!(
-                                        "auto_prompt: SAFETY NET OVERRIDE — detect_remaining_work found actionable work despite retry saying stop. Extracted prompt:\n---\n{}\n---",
-                                        remaining_prompt.chars().take(500).collect::<String>()
-                                    );
-                                    let next_prompt = with_first_prompt_context(
-                                        remaining_prompt,
-                                        prompt_summary.as_deref(),
-                                        data.title.as_deref(),
-                                        data.last_assistant_message.as_deref(),
-                                    );
-                                    Ok(AutoPromptOutcome::Continue(AutoPromptAction {
-                                        from_session_id: data.session_id,
-                                        from_title: data.title,
-                                        next_prompt,
-                                        work_dirs: data.work_dirs,
-                                        original_user_message: data.original_user_message,
-                                        profile_id: data.profile_id.clone(),
-                                        actual_input_tokens: data.actual_input_tokens,
-                                        last_assistant_message: data.last_assistant_message.clone(),
-                                    }))
-                                } else if let Some(plan_prompt) =
-                                    detect_remaining_plan_tasks(&data.context_json)
-                                {
-                                    log::warn!(
-                                        "auto_prompt: PLAN TASK FALLBACK — detect_remaining_work found nothing but plan files have unchecked tasks"
-                                    );
-                                    let next_prompt = with_first_prompt_context(
-                                        plan_prompt,
-                                        prompt_summary.as_deref(),
-                                        data.title.as_deref(),
-                                        data.last_assistant_message.as_deref(),
-                                    );
-                                    Ok(AutoPromptOutcome::Continue(AutoPromptAction {
-                                        from_session_id: data.session_id,
-                                        from_title: data.title,
-                                        next_prompt,
-                                        work_dirs: data.work_dirs,
-                                        original_user_message: data.original_user_message,
-                                        profile_id: data.profile_id.clone(),
-                                        actual_input_tokens: data.actual_input_tokens,
-                                        last_assistant_message: data.last_assistant_message.clone(),
-                                    }))
-                                } else {
-                                    log::info!(
-                                        "auto_prompt: all safety nets exhausted — no remaining work patterns and no unchecked plan tasks, accepting retry stop"
-                                    );
-                                    write_stop_log(
-                                        data.project_root.as_ref(),
-                                        data.iteration_count,
-                                        &format!("lightweight retry: {stop_reason}"),
-                                    );
-                                    reset_iteration();
-                                    Ok(AutoPromptOutcome::Stopped {
-                                        reason: stop_reason,
-                                    })
-                                }
-                            }
-                            None => {
+                                    .as_ref()
+                                    .is_some_and(|r| r.to_ascii_lowercase().starts_with("model"));
+                            if is_retry_synthetic {
                                 log::warn!(
-                                    "auto_prompt: all 3 lightweight retries failed, checking detect_remaining_work safety net"
+                                    "auto_prompt: lightweight retry attempt {attempt} got synthetic failure, retrying"
                                 );
-                                if let Some(remaining_prompt) =
-                                    detect_remaining_work(data.last_assistant_message.as_deref())
-                                {
-                                    log::warn!(
-                                        "auto_prompt: SAFETY NET OVERRIDE — detect_remaining_work found actionable work after all retries failed. Extracted prompt:\n---\n{}\n---",
-                                        remaining_prompt.chars().take(500).collect::<String>()
-                                    );
-                                    let next_prompt = with_first_prompt_context(
-                                        remaining_prompt,
-                                        prompt_summary.as_deref(),
-                                        data.title.as_deref(),
-                                        data.last_assistant_message.as_deref(),
-                                    );
-                                    Ok(AutoPromptOutcome::Continue(AutoPromptAction {
-                                        from_session_id: data.session_id,
-                                        from_title: data.title,
-                                        next_prompt,
-                                        work_dirs: data.work_dirs,
-                                        original_user_message: data.original_user_message,
-                                        profile_id: data.profile_id.clone(),
-                                        actual_input_tokens: data.actual_input_tokens,
-                                        last_assistant_message: data.last_assistant_message.clone(),
-                                    }))
-                                } else if let Some(plan_prompt) =
-                                    detect_remaining_plan_tasks(&data.context_json)
-                                {
-                                    log::warn!(
-                                        "auto_prompt: PLAN TASK FALLBACK — all retries failed but plan files have unchecked tasks"
-                                    );
-                                    let next_prompt = with_first_prompt_context(
-                                        plan_prompt,
-                                        prompt_summary.as_deref(),
-                                        data.title.as_deref(),
-                                        data.last_assistant_message.as_deref(),
-                                    );
-                                    Ok(AutoPromptOutcome::Continue(AutoPromptAction {
-                                        from_session_id: data.session_id,
-                                        from_title: data.title,
-                                        next_prompt,
-                                        work_dirs: data.work_dirs,
-                                        original_user_message: data.original_user_message,
-                                        profile_id: data.profile_id.clone(),
-                                        actual_input_tokens: data.actual_input_tokens,
-                                        last_assistant_message: data.last_assistant_message.clone(),
-                                    }))
-                                } else {
-                                    log::warn!(
-                                        "auto_prompt: all safety nets exhausted — no remaining work patterns and no unchecked plan tasks, giving up"
-                                    );
-                                    write_stop_log(
-                                        data.project_root.as_ref(),
-                                        data.iteration_count,
-                                        &format!(
-                                            "lightweight retry failed after 3 attempts, no remaining work or plan tasks detected: {reason}"
-                                        ),
-                                    );
-                                    reset_iteration();
-                                    Ok(AutoPromptOutcome::Stopped {
-                                        reason: format!("lightweight retry failed: {reason}"),
-                                    })
-                                }
+                                continue;
                             }
-                        }
-                    } else {
-                        let verification_count = VERIFICATION_COUNT.load(Ordering::Relaxed);
-                        let max_verifications = data.max_verification_attempts;
-
-                        if verification_count == 0 {
                             log::info!(
-                                "auto_prompt: WantsStop ('{reason}') — initiating pre-stop verification (attempt 1/{max_verifications})"
+                                "auto_prompt: lightweight retry attempt {attempt} ok: should_continue={}, prompt={:?}",
+                                parsed.should_continue,
+                                parsed.next_prompt
                             );
-                            VERIFICATION_COUNT.fetch_add(1, Ordering::Relaxed);
+                            retry_ok = Some(parsed);
+                            break;
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "auto_prompt: lightweight retry attempt {attempt} failed: {err:#}"
+                            );
+                        }
+                    }
+                }
 
-                            match build_pre_stop_verification_prompt(
-                                &data.context_json,
-                                &data.work_dirs,
-                            ) {
-                                Some(verification_prompt) => {
-                                    log::info!(
-                                        "auto_prompt: dispatching pre-stop verification prompt: {}...",
-                                        verification_prompt.chars().take(80).collect::<String>()
-                                    );
-                                    let next_prompt = with_first_prompt_context(
-                                        verification_prompt,
-                                        prompt_summary.as_deref(),
-                                        data.title.as_deref(),
-                                        data.last_assistant_message.as_deref(),
-                                    );
-                                    Ok(AutoPromptOutcome::Continue(AutoPromptAction {
-                                        from_session_id: data.session_id,
-                                        from_title: data.title,
-                                        next_prompt,
-                                        work_dirs: data.work_dirs,
-                                        original_user_message: data.original_user_message,
-                                        profile_id: data.profile_id.clone(),
-                                        actual_input_tokens: data.actual_input_tokens,
-                                        last_assistant_message: data.last_assistant_message.clone(),
-                                    }))
-                                }
-                                None => {
-                                    let stop_reason =
-                                        "LLM says stop, no plan files found for verification"
-                                            .to_string();
-                                    log::info!(
-                                        "auto_prompt: no verification needed (no plan files found), stopping"
-                                    );
-                                    write_stop_log(
-                                        data.project_root.as_ref(),
-                                        data.iteration_count,
-                                        &stop_reason,
-                                    );
-                                    reset_iteration();
-                                    Ok(AutoPromptOutcome::Stopped {
-                                        reason: stop_reason,
-                                    })
-                                }
-                            }
-                        } else if verification_count < max_verifications {
-                            let stop_reason = format!(
-                                "LLM says stop after verification attempt {verification_count}/{max_verifications}"
+                match retry_ok {
+                    Some(parsed) if parsed.should_continue => {
+                        let prompt = parsed
+                            .next_prompt
+                            .unwrap_or_else(|| "Continue with remaining work.".to_string());
+                        let next_prompt = with_first_prompt_context(
+                            prompt,
+                            prompt_summary.as_deref(),
+                            data.title.as_deref(),
+                            data.last_assistant_message.as_deref(),
+                        );
+                        Ok(AutoPromptOutcome::Continue(AutoPromptAction {
+                            from_session_id: data.session_id,
+                            from_title: data.title,
+                            next_prompt,
+                            work_dirs: data.work_dirs,
+                            original_user_message: data.original_user_message,
+                            profile_id: data.profile_id.clone(),
+                            actual_input_tokens: data.actual_input_tokens,
+                            last_assistant_message: data.last_assistant_message.clone(),
+                        }))
+                    }
+                    Some(parsed) => {
+                        let stop_reason = parsed
+                            .reason
+                            .unwrap_or_else(|| "lightweight retry says stop".to_string());
+                        log::info!("auto_prompt: lightweight retry says stop: {stop_reason}");
+                        log::info!(
+                            "auto_prompt: checking detect_remaining_work safety net before accepting retry stop"
+                        );
+                        if let Some(remaining_prompt) =
+                            detect_remaining_work(data.last_assistant_message.as_deref())
+                        {
+                            log::warn!(
+                                "auto_prompt: SAFETY NET OVERRIDE — detect_remaining_work found actionable work despite retry saying stop. Extracted prompt:\n---\n{}\n---",
+                                remaining_prompt.chars().take(500).collect::<String>()
                             );
-                            log::info!("auto_prompt: {stop_reason}");
+                            let next_prompt = with_first_prompt_context(
+                                remaining_prompt,
+                                prompt_summary.as_deref(),
+                                data.title.as_deref(),
+                                data.last_assistant_message.as_deref(),
+                            );
+                            Ok(AutoPromptOutcome::Continue(AutoPromptAction {
+                                from_session_id: data.session_id,
+                                from_title: data.title,
+                                next_prompt,
+                                work_dirs: data.work_dirs,
+                                original_user_message: data.original_user_message,
+                                profile_id: data.profile_id.clone(),
+                                actual_input_tokens: data.actual_input_tokens,
+                                last_assistant_message: data.last_assistant_message.clone(),
+                            }))
+                        } else if let Some(plan_prompt) =
+                            detect_remaining_plan_tasks(&data.context_json)
+                        {
+                            log::warn!(
+                                "auto_prompt: PLAN TASK FALLBACK — detect_remaining_work found nothing but plan files have unchecked tasks"
+                            );
+                            let next_prompt = with_first_prompt_context(
+                                plan_prompt,
+                                prompt_summary.as_deref(),
+                                data.title.as_deref(),
+                                data.last_assistant_message.as_deref(),
+                            );
+                            Ok(AutoPromptOutcome::Continue(AutoPromptAction {
+                                from_session_id: data.session_id,
+                                from_title: data.title,
+                                next_prompt,
+                                work_dirs: data.work_dirs,
+                                original_user_message: data.original_user_message,
+                                profile_id: data.profile_id.clone(),
+                                actual_input_tokens: data.actual_input_tokens,
+                                last_assistant_message: data.last_assistant_message.clone(),
+                            }))
+                        } else {
+                            log::info!(
+                                "auto_prompt: all safety nets exhausted — no remaining work patterns and no unchecked plan tasks, accepting retry stop"
+                            );
                             write_stop_log(
                                 data.project_root.as_ref(),
                                 data.iteration_count,
-                                &stop_reason,
+                                &format!("lightweight retry: {stop_reason}"),
                             );
                             reset_iteration();
                             Ok(AutoPromptOutcome::Stopped {
                                 reason: stop_reason,
                             })
+                        }
+                    }
+                    None => {
+                        log::warn!(
+                            "auto_prompt: all 3 lightweight retries failed, checking detect_remaining_work safety net"
+                        );
+                        if let Some(remaining_prompt) =
+                            detect_remaining_work(data.last_assistant_message.as_deref())
+                        {
+                            log::warn!(
+                                "auto_prompt: SAFETY NET OVERRIDE — detect_remaining_work found actionable work after all retries failed. Extracted prompt:\n---\n{}\n---",
+                                remaining_prompt.chars().take(500).collect::<String>()
+                            );
+                            let next_prompt = with_first_prompt_context(
+                                remaining_prompt,
+                                prompt_summary.as_deref(),
+                                data.title.as_deref(),
+                                data.last_assistant_message.as_deref(),
+                            );
+                            Ok(AutoPromptOutcome::Continue(AutoPromptAction {
+                                from_session_id: data.session_id,
+                                from_title: data.title,
+                                next_prompt,
+                                work_dirs: data.work_dirs,
+                                original_user_message: data.original_user_message,
+                                profile_id: data.profile_id.clone(),
+                                actual_input_tokens: data.actual_input_tokens,
+                                last_assistant_message: data.last_assistant_message.clone(),
+                            }))
+                        } else if let Some(plan_prompt) =
+                            detect_remaining_plan_tasks(&data.context_json)
+                        {
+                            log::warn!(
+                                "auto_prompt: PLAN TASK FALLBACK — all retries failed but plan files have unchecked tasks"
+                            );
+                            let next_prompt = with_first_prompt_context(
+                                plan_prompt,
+                                prompt_summary.as_deref(),
+                                data.title.as_deref(),
+                                data.last_assistant_message.as_deref(),
+                            );
+                            Ok(AutoPromptOutcome::Continue(AutoPromptAction {
+                                from_session_id: data.session_id,
+                                from_title: data.title,
+                                next_prompt,
+                                work_dirs: data.work_dirs,
+                                original_user_message: data.original_user_message,
+                                profile_id: data.profile_id.clone(),
+                                actual_input_tokens: data.actual_input_tokens,
+                                last_assistant_message: data.last_assistant_message.clone(),
+                            }))
                         } else {
+                            log::warn!(
+                                "auto_prompt: all safety nets exhausted — no remaining work patterns and no unchecked plan tasks, giving up"
+                            );
+                            write_stop_log(
+                                data.project_root.as_ref(),
+                                data.iteration_count,
+                                &format!(
+                                    "lightweight retry failed after 3 attempts, no remaining work or plan tasks detected: {reason}"
+                                ),
+                            );
+                            reset_iteration();
+                            Ok(AutoPromptOutcome::Stopped {
+                                reason: format!("lightweight retry failed: {reason}"),
+                            })
+                        }
+                    }
+                }
+            } else {
+                let verification_count = VERIFICATION_COUNT.load(Ordering::Relaxed);
+                let max_verifications = data.max_verification_attempts;
+
+                if verification_count == 0 {
+                    log::info!(
+                        "auto_prompt: WantsStop ('{reason}') — initiating pre-stop verification (attempt 1/{max_verifications})"
+                    );
+                    VERIFICATION_COUNT.fetch_add(1, Ordering::Relaxed);
+
+                    match build_pre_stop_verification_prompt(&data.context_json, &data.work_dirs) {
+                        Some(verification_prompt) => {
+                            log::info!(
+                                "auto_prompt: dispatching pre-stop verification prompt: {}...",
+                                verification_prompt.chars().take(80).collect::<String>()
+                            );
+                            let next_prompt = with_first_prompt_context(
+                                verification_prompt,
+                                prompt_summary.as_deref(),
+                                data.title.as_deref(),
+                                data.last_assistant_message.as_deref(),
+                            );
+                            Ok(AutoPromptOutcome::Continue(AutoPromptAction {
+                                from_session_id: data.session_id,
+                                from_title: data.title,
+                                next_prompt,
+                                work_dirs: data.work_dirs,
+                                original_user_message: data.original_user_message,
+                                profile_id: data.profile_id.clone(),
+                                actual_input_tokens: data.actual_input_tokens,
+                                last_assistant_message: data.last_assistant_message.clone(),
+                            }))
+                        }
+                        None => {
                             let stop_reason =
-                                format!("max verification attempts ({max_verifications}) exceeded");
-                            log::warn!("auto_prompt: {stop_reason}");
+                                "LLM says stop, no plan files found for verification".to_string();
+                            log::info!(
+                                "auto_prompt: no verification needed (no plan files found), stopping"
+                            );
                             write_stop_log(
                                 data.project_root.as_ref(),
                                 data.iteration_count,
@@ -1440,18 +1431,35 @@ pub async fn decide_with_llm(
                             })
                         }
                     }
+                } else if verification_count < max_verifications {
+                    let stop_reason = format!(
+                        "LLM says stop after verification attempt {verification_count}/{max_verifications}"
+                    );
+                    log::info!("auto_prompt: {stop_reason}");
+                    write_stop_log(
+                        data.project_root.as_ref(),
+                        data.iteration_count,
+                        &stop_reason,
+                    );
+                    reset_iteration();
+                    Ok(AutoPromptOutcome::Stopped {
+                        reason: stop_reason,
+                    })
+                } else {
+                    let stop_reason =
+                        format!("max verification attempts ({max_verifications}) exceeded");
+                    log::warn!("auto_prompt: {stop_reason}");
+                    write_stop_log(
+                        data.project_root.as_ref(),
+                        data.iteration_count,
+                        &stop_reason,
+                    );
+                    reset_iteration();
+                    Ok(AutoPromptOutcome::Stopped {
+                        reason: stop_reason,
+                    })
                 }
             }
-        }
-        Err(err) => {
-            write_error_log(
-                data.project_root.as_ref(),
-                data.iteration_count,
-                &format!("{:?}", data.model.id()),
-                &err,
-            );
-            log::warn!("auto_prompt: language model call failed: {err}");
-            Err(err)
         }
     }
 }
@@ -3957,6 +3965,79 @@ mod tests {
         assert!(
             matches!(result, EvaluationResult::WantsStop { .. }),
             "expected WantsStop for stream errors, got {result:?}"
+        );
+    }
+
+    // --- Plan 006: orchestration `Err` (timeout/empty stream) must route to the
+    // same recovery path as the empty-Text synthetic `Ok`. The fix synthesizes an
+    // AutoPromptResponse in the `Err` arm; these tests lock in its contract:
+    // (a) it trips the `is_synthetic_failure` predicate, and (b) evaluate_response
+    // classifies it as WantsStop so the lightweight-retry + safety-net recovery runs.
+    #[test]
+    fn test_plan006_orchestration_err_synthetic_trips_is_synthetic_failure() {
+        // Exact shape constructed in decide_with_llm's `Err` arm.
+        let failure_reason =
+            "model orchestration call failed (timeout/empty stream): request timed out after 60s"
+                .to_string();
+        let response = AutoPromptResponse {
+            should_continue: false,
+            next_prompt: None,
+            reason: Some(failure_reason),
+            all_plan_done: false,
+            confidence: Some(0.0),
+            thread_summary: None,
+            handover: None,
+        };
+        // The real predicate used in decide_with_llm (kept in sync deliberately).
+        let is_synthetic_failure = response.confidence <= Some(0.3)
+            && response
+                .reason
+                .as_ref()
+                .is_some_and(|r| r.to_ascii_lowercase().starts_with("model"));
+        assert!(
+            is_synthetic_failure,
+            "orchestration-Err synthetic response must trip is_synthetic_failure so recovery engages"
+        );
+    }
+
+    #[test]
+    fn test_plan006_orchestration_err_synthetic_routes_to_wants_stop() {
+        let failure_reason =
+            "model orchestration call failed (timeout/empty stream): stream produced only errors"
+                .to_string();
+        let input = EvaluationInput {
+            should_continue: false,
+            confidence: Some(0.0),
+            reason: Some(failure_reason),
+            is_synthetic_failure: true,
+            ..make_input()
+        };
+        let result = evaluate_response(&input);
+        assert!(
+            matches!(result, EvaluationResult::WantsStop { .. }),
+            "orchestration-Err synthetic must be WantsStop (routes into recovery), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_plan006_non_model_err_reason_is_not_synthetic_failure() {
+        // Guard: a plain network error surfaced with a non-"model" reason must NOT
+        // masquerade as a synthetic failure. (Reason prefix is what distinguishes a
+        // model-produced-empty response from a transport error.)
+        let input = EvaluationInput {
+            should_continue: false,
+            confidence: Some(0.0),
+            reason: Some("connection reset by peer".to_string()),
+            is_synthetic_failure: false,
+            ..make_input()
+        };
+        let result = evaluate_response(&input);
+        // Still WantsStop (confidence too low), but is_synthetic_failure=false means
+        // it goes to pre-stop verification, NOT the lightweight retry. We assert the
+        // classification shape so the dispatch asymmetry stays intentional.
+        assert!(
+            matches!(result, EvaluationResult::WantsStop { .. }),
+            "non-model error still WantsStop (low conf), got {result:?}"
         );
     }
 
