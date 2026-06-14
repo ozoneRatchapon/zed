@@ -203,17 +203,20 @@ fn dispatch_action(
         .active_thread()
         .is_some_and(|tv| tv.read(cx).thread.read(cx).connection().agent_id() == *ZED_AGENT_ID);
 
-    let same_thread_threshold = auto_prompt::load_config_cached()
-        .map(|c| c.same_thread_token_threshold)
-        .unwrap_or(50_000);
+    // Plan 005: use `fork_at` as the primary fork ceiling, falling back to
+    // `same_thread_token_threshold` (the legacy field) via `.max()` so that
+    // configs written before Plan 005 behave byte-identically to before.
+    let fork_at = auto_prompt::load_config_cached()
+        .map(|c| c.fork_at.max(c.same_thread_token_threshold))
+        .unwrap_or(70_000);
 
     let use_same_thread = action
         .actual_input_tokens
-        .map(|t| (t as usize) < same_thread_threshold)
+        .map(|t| (t as usize) < fork_at)
         .unwrap_or(true);
 
     log::info!(
-        "[auto_prompt] dispatch_action: token decision: actual_input_tokens={:?}, threshold={same_thread_threshold}, use_same_thread={use_same_thread}",
+        "[auto_prompt] dispatch_action: token decision: actual_input_tokens={:?}, fork_at={fork_at}, use_same_thread={use_same_thread}",
         action.actual_input_tokens
     );
 

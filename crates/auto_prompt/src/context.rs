@@ -19,6 +19,62 @@ pub enum StopPhase {
     Verified,
 }
 
+/// One entry in the compaction audit log. Records what was summarized, by what
+/// strategy, and how many bytes were reclaimed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompactionEntry {
+    /// Index into `AutoPromptContext.messages` of the compacted message.
+    pub message_index: usize,
+    /// Role name of the compacted message (user, assistant, tool, plan).
+    pub role: String,
+    /// Original content length in bytes.
+    pub original_bytes: usize,
+    /// Summary content length in bytes.
+    pub summary_bytes: usize,
+    /// Strategy used to produce the summary.
+    pub strategy: CompactionStrategy,
+}
+
+/// How a message was compacted.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionStrategy {
+    /// Tool call collapsed to one-line metadata (tool name, status, exit, cwd).
+    ToolCallMetadata,
+    /// Assistant chunk kept first N chars + ellipsis.
+    AssistantTruncated,
+    /// Assistant chunk abstracted by an LLM (T1) into one sentence.
+    AssistantLlmAbstracted,
+}
+
+/// Structured handover payload emitted by the orchestrator when a thread fork
+/// is imminent. Serialized into a `<handover>...</handover>` YAML block and
+/// prepended to the new thread's first user message.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HandoverBlock {
+    /// One-sentence statement of what the user originally asked for.
+    #[serde(default)]
+    pub original_intent: Option<String>,
+    /// Completed work in this thread, as bullet strings.
+    #[serde(default)]
+    pub completed: Vec<String>,
+    /// Currently in-progress work (not yet verifiably done).
+    #[serde(default)]
+    pub in_progress: Vec<String>,
+    /// Blockers, unresolved questions, or known-broken state.
+    #[serde(default)]
+    pub blocked_on: Vec<String>,
+    /// The single next concrete step the new thread should take.
+    #[serde(default)]
+    pub next_step: Option<String>,
+    /// Files modified in this thread (paths only, no contents).
+    #[serde(default)]
+    pub files_touched: Vec<String>,
+    /// Plan files relevant to the current work (path or plan number).
+    #[serde(default)]
+    pub active_plans: Vec<String>,
+}
+
 /// Serializable context payload sent to the external LLM.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AutoPromptContext {
@@ -62,6 +118,14 @@ pub struct AutoPromptContext {
     pub verification_count: u32,
     /// Whether this context was truncated/summarized due to token limits.
     pub was_truncated: bool,
+    /// Audit log of messages compacted by Plan 005 rolling compaction.
+    /// Empty when no compaction occurred this iteration.
+    #[serde(default)]
+    pub compaction_log: Vec<CompactionEntry>,
+    /// Set to true when `actual_input_tokens >= fork_at`.
+    /// Tells the orchestrator a fork is imminent and a `HandoverBlock` is expected.
+    #[serde(default)]
+    pub fork_imminent: bool,
     /// Whether any plan file contains checkbox patterns (- [ ] or - [x]).
     pub plan_has_checkboxes: bool,
     /// The first plan filename that exists, or a default if none.
@@ -130,6 +194,11 @@ pub struct AutoPromptResponse {
     /// The active plan should be bolded (e.g. **plan 083**) in the summary text.
     #[serde(default)]
     pub thread_summary: Option<String>,
+    /// Structured handover emitted when a fork is imminent (`fork_imminent: true`).
+    /// When present, it is serialized as a `<handover>` YAML block and prepended
+    /// to the new thread's first user message. None = no handover (graceful fallback).
+    #[serde(default)]
+    pub handover: Option<HandoverBlock>,
 }
 
 impl AutoPromptContext {
@@ -254,6 +323,8 @@ impl AutoPromptContext {
             stop_phase: StopPhase::Working,
             verification_count: 0,
             was_truncated: false,
+            compaction_log: Vec::new(),
+            fork_imminent: false,
             plan_has_checkboxes: false,
             first_plan_filename: String::new(),
             plan_number: String::new(),

@@ -6,12 +6,14 @@
 //! handles the actual GPUI action dispatch.
 
 mod config;
+pub mod compaction;
 pub mod context;
+pub mod handover;
 pub mod local_mlx;
 pub mod routing;
 
 pub use config::AutoPromptConfig;
-pub use config::{CloudFallbackConfig, LocalRoutingConfig, OrchestrationProvider, TierConfig};
+pub use config::{CloudFallbackConfig, CompactionConfig, LocalRoutingConfig, OrchestrationProvider, TierConfig};
 pub use context::{AutoPromptContext, AutoPromptResponse, PlanFileContent, StopPhase};
 
 use acp::schema::{SessionId, StopReason};
@@ -696,6 +698,33 @@ pub fn decide(
         );
         ctx.stop_phase = stop_phase.clone();
         ctx.verification_count = verification_count;
+
+        // Plan 005: rolling compaction. If enabled and over budget, summarize
+        // old tool calls / assistant chunks in-place to stretch the thread.
+        if let Some(compaction_cfg) = config.compaction.as_ref().filter(|c| c.enabled) {
+            if ctx.approximate_token_count > compaction_cfg.compact_at {
+                let stats = compaction::compact_old_messages(
+                    &mut ctx,
+                    compaction_cfg.compact_target,
+                    compaction_cfg,
+                );
+                log::info!(
+                    "[auto_prompt::decide] compaction: messages={}, bytes_reclaimed={}, tokens_now={}",
+                    stats.messages_compacted,
+                    stats.bytes_reclaimed,
+                    ctx.approximate_token_count
+                );
+            }
+        }
+
+        // Plan 005: signal fork-imminent so the orchestrator knows to emit
+        // a HandoverBlock. Use actual_input_tokens when available, fall back
+        // to the chars/4 estimate.
+        let ctx_tokens = ctx
+            .actual_input_tokens
+            .map(|t| t as usize)
+            .unwrap_or(ctx.approximate_token_count);
+        ctx.fork_imminent = ctx_tokens >= config.fork_at;
         let sid = thread_ref.session_id().clone();
         let title = thread_ref.title().map(|t| t.to_string());
         let dirs = thread_ref.work_dirs().map(|pl| pl.paths().to_vec());
@@ -805,6 +834,28 @@ pub async fn decide_with_llm(
 
     match result {
         Ok((raw_response, mut response)) => {
+            // Plan 005: if the orchestrator emitted a HandoverBlock, prepend it
+            // to `next_prompt` as a `<handover>` YAML fence. Every downstream
+            // consumer (EvaluationInput, with_first_prompt_context, AutoPromptAction)
+            // then automatically carries the handover into the forked thread.
+            if let Some(prompt) = response.next_prompt.take() {
+                let with_handover = handover::prepend_handover(&prompt, response.handover.as_ref());
+                response.next_prompt = Some(with_handover);
+            } else if response.handover.is_some() {
+                // Handover emitted with no next_prompt — unusual but possible.
+                // Synthesize a minimal continuation that references the handover.
+                let block = response
+                    .handover
+                    .as_ref()
+                    .map(|h| h.to_yaml_block())
+                    .unwrap_or_default();
+                if !block.is_empty() {
+                    response.next_prompt = Some(format!(
+                        "{block}\n\nContinue from the handover above."
+                    ));
+                }
+            }
+
             let has_prompt = response
                 .next_prompt
                 .as_ref()
@@ -2124,6 +2175,7 @@ pub(crate) fn parse_response(text: &str) -> anyhow::Result<AutoPromptResponse> {
                 all_plan_done: false,
                 confidence: Some(0.0),
                 thread_summary: None,
+                handover: None,
             })
         }
     }

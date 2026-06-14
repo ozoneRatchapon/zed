@@ -220,6 +220,7 @@ fn synthetic_stop(reason: &str) -> (String, AutoPromptResponse) {
         all_plan_done: false,
         confidence: Some(0.0),
         thread_summary: None,
+        handover: None,
     };
     let raw = serde_json::to_string(&response).unwrap_or_else(|_| "{}".into());
     (raw, response)

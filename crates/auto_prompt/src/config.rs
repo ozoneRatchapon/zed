@@ -49,6 +49,17 @@ pub struct AutoPromptConfig {
     #[serde(default = "default_same_thread_token_threshold")]
     pub same_thread_token_threshold: usize,
 
+    /// Token count at which to FORK to a new thread. Plan 005 addition.
+    /// Falls back to `same_thread_token_threshold` (via `.max()`) when unset
+    /// so old configs without this field behave identically to before.
+    #[serde(default = "default_fork_at")]
+    pub fork_at: usize,
+
+    /// Rolling compaction config. None (absent) = compaction disabled (current behavior).
+    /// Plan 005 addition.
+    #[serde(default)]
+    pub compaction: Option<CompactionConfig>,
+
     /// Which provider the orchestrator uses for the "should I continue?" decision.
     /// Default: Cloud (current behavior — uses Zed's configured default model).
     /// Set to "auto" for tiered local-LLM routing (T1 → T2 → cloud fallback).
@@ -96,6 +107,42 @@ pub struct TierConfig {
     /// HTTP timeout in milliseconds for a single orchestration call.
     #[serde(default = "default_tier_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+/// Rolling compaction config (Plan 005). When enabled, the orchestrator's
+/// input context is shrunk by summarizing old tool calls and assistant chunks
+/// in-place once the context crosses `compact_at` tokens.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// Master switch. False (or absent) = compaction disabled entirely.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Trigger compaction when context crosses this many tokens.
+    #[serde(default = "default_compact_at")]
+    pub compact_at: usize,
+    /// Target token count after compaction. Compaction stops once under this.
+    #[serde(default = "default_compact_target")]
+    pub compact_target: usize,
+    /// Number of most-recent messages to never compact (preserves recent context).
+    #[serde(default = "default_keep_recent")]
+    pub keep_recent: usize,
+    /// If true, use a local LLM (T1 Llama-1B) to produce one-sentence abstracts
+    /// of old assistant chunks. If false (default), dumb-truncate to 200 chars.
+    /// LLM abstracts are higher quality but cost a model call per compaction.
+    #[serde(default)]
+    pub use_llm_for_assistant_abstracts: bool,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            compact_at: default_compact_at(),
+            compact_target: default_compact_target(),
+            keep_recent: default_keep_recent(),
+            use_llm_for_assistant_abstracts: false,
+        }
+    }
 }
 
 /// When to escalate from local tiers back to the cloud provider.
@@ -186,6 +233,22 @@ fn default_same_thread_token_threshold() -> usize {
     50_000
 }
 
+fn default_fork_at() -> usize {
+    70_000
+}
+
+fn default_compact_at() -> usize {
+    35_000
+}
+
+fn default_compact_target() -> usize {
+    25_000
+}
+
+fn default_keep_recent() -> usize {
+    12
+}
+
 fn default_tier_confidence() -> f64 {
     0.75
 }
@@ -217,6 +280,8 @@ impl Default for AutoPromptConfig {
             max_verification_attempts: default_max_verification_attempts(),
             max_llm_retries: default_max_llm_retries(),
             same_thread_token_threshold: default_same_thread_token_threshold(),
+            fork_at: default_fork_at(),
+            compaction: None,
             orchestration_provider: OrchestrationProvider::default(),
             local_routing: None,
             verdict_log_path: None,
@@ -295,6 +360,38 @@ impl AutoPromptConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(default_same_thread_token_threshold);
 
+        let fork_at = std::env::var("ZED_AUTO_PROMPT_FORK_AT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(default_fork_at);
+
+        let compaction = std::env::var("ZED_AUTO_PROMPT_COMPACTION_ENABLED")
+            .ok()
+            .and_then(|v| match v.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => Some(CompactionConfig {
+                    enabled: true,
+                    compact_at: std::env::var("ZED_AUTO_PROMPT_COMPACTION_COMPACT_AT")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_compact_at),
+                    compact_target: std::env::var("ZED_AUTO_PROMPT_COMPACTION_COMPACT_TARGET")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_compact_target),
+                    keep_recent: std::env::var("ZED_AUTO_PROMPT_COMPACTION_KEEP_RECENT")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_keep_recent),
+                    use_llm_for_assistant_abstracts: std::env::var(
+                        "ZED_AUTO_PROMPT_COMPACTION_USE_LLM_ABSTRACTS",
+                    )
+                    .ok()
+                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                    .unwrap_or(false),
+                }),
+                _ => None,
+            });
+
         let orchestration_provider = std::env::var("ZED_AUTO_PROMPT_ORCHESTRATION_PROVIDER")
             .ok()
             .and_then(|v| match v.to_ascii_lowercase().as_str() {
@@ -319,6 +416,8 @@ impl AutoPromptConfig {
             max_verification_attempts,
             max_llm_retries,
             same_thread_token_threshold,
+            fork_at,
+            compaction,
             orchestration_provider,
             local_routing: None,
             verdict_log_path,
