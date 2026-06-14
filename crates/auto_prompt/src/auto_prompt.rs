@@ -2217,6 +2217,25 @@ pub(crate) fn parse_response(text: &str) -> anyhow::Result<AutoPromptResponse> {
     match serde_json::from_str(json_str) {
         Ok(response) => Ok(response),
         Err(parse_err) => {
+            // Plan 009: GLM-5.1 sometimes emits JSON with duplicate keys (e.g.
+            // two `thread_summary` fields), which serde_json strictly rejects.
+            // Attempt to recover by rebuilding the object keeping the first
+            // occurrence of each key before falling back to the synthetic stop.
+            if format!("{parse_err}").contains("duplicate field") {
+                match deduplicate_and_parse(json_str) {
+                    Ok(response) => {
+                        log::info!(
+                            "auto_prompt: recovered from duplicate JSON key: {parse_err}"
+                        );
+                        return Ok(response);
+                    }
+                    Err(dedup_err) => {
+                        log::warn!(
+                            "auto_prompt: duplicate-key recovery failed ({dedup_err:#}); falling back to synthetic stop"
+                        );
+                    }
+                }
+            }
             let preview = text.chars().take(200).collect::<String>();
             log::warn!("auto_prompt: failed to parse response as JSON ({parse_err}): {preview:?}");
             log::warn!("auto_prompt: synthesizing stop response to avoid retry loop");
@@ -2235,6 +2254,158 @@ pub(crate) fn parse_response(text: &str) -> anyhow::Result<AutoPromptResponse> {
             })
         }
     }
+}
+
+// ── Plan 009: duplicate-JSON-key recovery helpers ────────────────────────────
+
+/// Attempt to recover an `AutoPromptResponse` from JSON containing duplicate
+/// object keys by keeping only the first occurrence of each key, then re-parsing.
+///
+/// GLM-5.1 sometimes emits e.g. `{"thread_summary": "...", "thread_summary": null}`,
+/// which `serde_json` strictly rejects. We rebuild the object keeping the first
+/// occurrence (the real value, not the trailing null) so the response is usable.
+fn deduplicate_and_parse(json_str: &str) -> anyhow::Result<AutoPromptResponse> {
+    let deduped = rebuild_deduplicated_json(json_str)?;
+    log::debug!("auto_prompt: deduplicated JSON: {deduped}");
+    serde_json::from_str(&deduped).context("re-parsed deduplicated JSON")
+}
+
+/// Rebuild a top-level JSON object string, keeping only the first occurrence of
+/// each key. Handles nested objects, arrays, and escaped strings.
+///
+/// Returns `Err` if the input is not a JSON object (doesn't start/end with `{}`).
+fn rebuild_deduplicated_json(json_str: &str) -> anyhow::Result<String> {
+    let trimmed = json_str.trim();
+    anyhow::ensure!(
+        trimmed.starts_with('{') && trimmed.ends_with('}'),
+        "expected JSON object, got: {}",
+        trimmed.chars().take(80).collect::<String>()
+    );
+
+    // Inner content between the outer braces.
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut entries: Vec<String> = Vec::new();
+
+    let bytes = inner.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0usize;
+
+    while pos < len {
+        // Skip whitespace between entries.
+        pos = skip_ws(bytes, pos);
+        if pos >= len {
+            break;
+        }
+
+        // Expect a quoted key.
+        if bytes[pos] != b'"' {
+            break;
+        }
+        let (key_raw, after_key) = match scan_json_string(bytes, pos) {
+            Some(result) => result,
+            None => break,
+        };
+        pos = after_key;
+
+        // Skip whitespace and the colon separator.
+        pos = skip_ws(bytes, pos);
+        if pos >= len || bytes[pos] != b':' {
+            break;
+        }
+        pos += 1; // consume ':'
+        pos = skip_ws(bytes, pos);
+
+        // Scan the value, tracking nesting depth + string state.
+        let value_start = pos;
+        pos = match scan_json_value(bytes, pos) {
+            Some(end) => end,
+            None => break,
+        };
+        let value_raw = &inner[value_start..pos];
+
+        // Resolve escape sequences in the key via serde_json.
+        let parsed_key: String = match serde_json::from_str(key_raw) {
+            Ok(k) => k,
+            Err(_) => break,
+        };
+
+        // Keep only the first occurrence of each key.
+        if seen.insert(parsed_key.clone()) {
+            entries.push(format!("{key_raw}:{value_raw}"));
+        } else {
+            log::debug!("auto_prompt: dropping duplicate JSON key '{parsed_key}'");
+        }
+
+        // Skip optional trailing comma.
+        pos = skip_ws(bytes, pos);
+        if pos < len && bytes[pos] == b',' {
+            pos += 1;
+        }
+    }
+
+    Ok(format!("{{{}}}", entries.join(",")))
+}
+
+/// Skip ASCII whitespace (space, tab, newline, CR) starting at `pos`.
+fn skip_ws(bytes: &[u8], mut pos: usize) -> usize {
+    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+        pos += 1;
+    }
+    pos
+}
+
+/// Scan a JSON string literal starting at `pos` (must point at the opening `"`).
+/// Returns `(raw_slice_including_quotes, position_after_closing_quote)` or `None`.
+fn scan_json_string(bytes: &[u8], pos: usize) -> Option<(&str, usize)> {
+    debug_assert_eq!(bytes[pos], b'"');
+    let start = pos;
+    let mut i = pos + 1;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if escaped {
+            escaped = false;
+        } else if ch == b'\\' {
+            escaped = true;
+        } else if ch == b'"' {
+            let raw = std::str::from_utf8(&bytes[start..=i]).ok()?;
+            return Some((raw, i + 1));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Scan a JSON value starting at `pos`, returning the position immediately after
+/// the value ends (at a top-level comma or end-of-input). Tracks nesting depth
+/// and string state so commas inside nested structures don't fool the splitter.
+fn scan_json_value(bytes: &[u8], mut pos: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while pos < bytes.len() {
+        let ch = bytes[pos];
+        if escaped {
+            escaped = false;
+        } else if in_string {
+            match ch {
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match ch {
+                b'"' => in_string = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => depth -= 1,
+                b',' if depth == 0 => return Some(pos),
+                _ => {}
+            }
+        }
+        pos += 1;
+    }
+    Some(pos)
 }
 
 fn extract_json(text: &str) -> &str {
@@ -4453,5 +4624,100 @@ mod tests {
             result.is_none(),
             "only skipped/strikethrough checkboxes should not be actionable"
         );
+    }
+
+    // ── Plan 009: duplicate-JSON-key recovery tests ─────────────────────────
+
+    #[test]
+    fn test_rebuild_dedup_keeps_first_occurrence() {
+        let json = r#"{"a": 1, "b": "two", "a": 3}"#;
+        let result = rebuild_deduplicated_json(json).expect("should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should be valid JSON");
+        assert_eq!(parsed["a"], 1, "first occurrence must win");
+        assert_eq!(parsed["b"], "two");
+    }
+
+    #[test]
+    fn test_rebuild_dedup_null_after_value() {
+        // The GLM-5.1 pattern: real value then trailing null duplicate.
+        let json = r#"{"thread_summary": "long summary here", "confidence": 0.75, "thread_summary": null}"#;
+        let result = rebuild_deduplicated_json(json).expect("should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should be valid JSON");
+        assert_eq!(parsed["thread_summary"], "long summary here");
+        assert_eq!(parsed["confidence"], 0.75);
+    }
+
+    #[test]
+    fn test_rebuild_dedup_preserves_nested_objects() {
+        let json = r#"{"plan": {"tasks": [1, 2]}, "plan": null, "next": "go"}"#;
+        let result = rebuild_deduplicated_json(json).expect("should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should be valid JSON");
+        assert!(parsed["plan"]["tasks"].is_array(), "nested object must survive");
+        assert_eq!(parsed["plan"]["tasks"][1], 2);
+        assert_eq!(parsed["next"], "go");
+    }
+
+    #[test]
+    fn test_rebuild_dedup_handles_escaped_quotes_in_strings() {
+        let json = r#"{"msg": "hello \"world\"", "msg": "overwritten"}"#;
+        let result = rebuild_deduplicated_json(json).expect("should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should be valid JSON");
+        assert_eq!(parsed["msg"], "hello \"world\"");
+    }
+
+    #[test]
+    fn test_rebuild_dedup_comma_inside_string_does_not_split() {
+        let json = r#"{"a": "x, y, z", "a": "lost"}"#;
+        let result = rebuild_deduplicated_json(json).expect("should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should be valid JSON");
+        assert_eq!(parsed["a"], "x, y, z");
+    }
+
+    #[test]
+    fn test_rebuild_dedup_non_object_returns_err() {
+        let json = r#"[1, 2, 3]"#;
+        assert!(rebuild_deduplicated_json(json).is_err());
+    }
+
+    #[test]
+    fn test_rebuild_dedup_no_duplicates_unchanged_semantics() {
+        let json = r#"{"confidence": 0.9, "next_prompt": "go", "reason": "ok"}"#;
+        let result = rebuild_deduplicated_json(json).expect("should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("should be valid JSON");
+        assert_eq!(parsed["confidence"], 0.9);
+        assert_eq!(parsed["next_prompt"], "go");
+        assert_eq!(parsed["reason"], "ok");
+    }
+
+    #[test]
+    fn test_parse_response_recovers_from_duplicate_key() {
+        let raw = r#"```json
+{"confidence": 0.75, "next_prompt": "Continue with plan 260", "reason": "Plan 257 done", "should_continue": true, "thread_summary": "Plan 257 done.", "thread_summary": null}
+```"#;
+        let result = parse_response(raw).expect("should recover from duplicate key");
+        assert_eq!(result.next_prompt.as_deref(), Some("Continue with plan 260"));
+        assert_eq!(result.confidence, Some(0.75));
+        assert_eq!(
+            result.thread_summary.as_deref(),
+            Some("Plan 257 done.")
+        );
+        assert!(result.should_continue);
+    }
+
+    #[test]
+    fn test_parse_response_normal_json_still_works() {
+        let raw = r#"```json
+{"confidence": 0.9, "next_prompt": "Do the thing", "reason": "work remains", "thread_summary": "Summary here.", "should_continue": true}
+```"#;
+        let result = parse_response(raw).expect("normal JSON should parse fine");
+        assert_eq!(result.next_prompt.as_deref(), Some("Do the thing"));
+        assert_eq!(result.confidence, Some(0.9));
+        assert!(result.should_continue);
     }
 }
