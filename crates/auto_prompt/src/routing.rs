@@ -197,7 +197,14 @@ async fn cloud_or_local_fail(
 
 /// Direct cloud call — identical to pre-change behavior.
 async fn cloud_call(data: &LlmCallData, cx: &AsyncApp) -> Result<(String, AutoPromptResponse)> {
-    call_language_model(&data.model, &data.system_prompt, &data.context_json, cx).await
+    call_language_model(
+        &data.model,
+        &data.system_prompt,
+        &data.context_json,
+        &data.call_timeouts,
+        cx,
+    )
+    .await
 }
 
 fn cloud_fallback_enabled(local: &Option<LocalRoutingConfig>) -> bool {

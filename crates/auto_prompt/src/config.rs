@@ -76,6 +76,13 @@ pub struct AutoPromptConfig {
     /// Used for Phase 2 calibration of confidence thresholds. None = no logging.
     #[serde(default)]
     pub verdict_log_path: Option<PathBuf>,
+
+    /// Streaming-call timeout tiers (Plan 008). A two-tier per-event timeout that
+    /// replaces the old monolithic 60s ceiling: a generous first-token window
+    /// absorbs large-context prefill (slow TTFT), a tight per-event window catches
+    /// genuinely stalled streams, and a total backstop bounds runaway streams.
+    #[serde(default)]
+    pub call_timeouts: CallTimeouts,
 }
 
 // ── Tiered routing types ─────────────────────────────────────────────────────
@@ -203,6 +210,57 @@ impl Default for CloudFallbackConfig {
     }
 }
 
+// ── Streaming call timeouts (Plan 008) ────────────────────────────────────────
+
+/// Two-tier per-event timeout config for `call_language_model`'s streaming loop,
+/// replacing the old monolithic 60s ceiling (Plan 008).
+///
+/// - `first_token_secs`: window for the FIRST event (time-to-first-token).
+///   Generous, because large-context prefill on GLM-5.1 can legitimately exceed
+///   60s. Default 120s.
+/// - `per_event_secs`: window between consecutive events AFTER the first.
+///   Tight, because once a stream is flowing a gap here means it has stalled.
+///   Default 30s.
+/// - `total_secs`: hard ceiling on the whole call regardless of progress, so a
+///   pathological "one token / (per_event_secs - epsilon)" stream cannot run
+///   forever. Default 300s.
+///
+/// Overridable via `ZED_AUTO_PROMPT_CALL_TIMEOUT_*` env vars (see `from_env`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CallTimeouts {
+    #[serde(default = "default_call_timeout_first_token_secs")]
+    pub first_token_secs: u64,
+    #[serde(default = "default_call_timeout_per_event_secs")]
+    pub per_event_secs: u64,
+    #[serde(default = "default_call_timeout_total_secs")]
+    pub total_secs: u64,
+}
+
+impl CallTimeouts {
+    /// First-token window as a `Duration`.
+    pub fn first_token(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.first_token_secs)
+    }
+    /// Per-event (subsequent) window as a `Duration`.
+    pub fn per_event(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.per_event_secs)
+    }
+    /// Total-call backstop as a `Duration`.
+    pub fn total(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.total_secs)
+    }
+}
+
+impl Default for CallTimeouts {
+    fn default() -> Self {
+        Self {
+            first_token_secs: default_call_timeout_first_token_secs(),
+            per_event_secs: default_call_timeout_per_event_secs(),
+            total_secs: default_call_timeout_total_secs(),
+        }
+    }
+}
+
 // ── serde default fns ────────────────────────────────────────────────────────
 
 fn default_true() -> bool {
@@ -270,6 +328,18 @@ fn default_cloud_fallback_triggers() -> Vec<String> {
     ]
 }
 
+fn default_call_timeout_first_token_secs() -> u64 {
+    120
+}
+
+fn default_call_timeout_per_event_secs() -> u64 {
+    30
+}
+
+fn default_call_timeout_total_secs() -> u64 {
+    300
+}
+
 impl Default for AutoPromptConfig {
     fn default() -> Self {
         Self {
@@ -285,6 +355,7 @@ impl Default for AutoPromptConfig {
             orchestration_provider: OrchestrationProvider::default(),
             local_routing: None,
             verdict_log_path: None,
+            call_timeouts: CallTimeouts::default(),
         }
     }
 }
@@ -406,6 +477,21 @@ impl AutoPromptConfig {
             .ok()
             .map(PathBuf::from);
 
+        let call_timeouts = CallTimeouts {
+            first_token_secs: std::env::var("ZED_AUTO_PROMPT_CALL_TIMEOUT_FIRST_TOKEN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_call_timeout_first_token_secs),
+            per_event_secs: std::env::var("ZED_AUTO_PROMPT_CALL_TIMEOUT_PER_EVENT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_call_timeout_per_event_secs),
+            total_secs: std::env::var("ZED_AUTO_PROMPT_CALL_TIMEOUT_TOTAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_call_timeout_total_secs),
+        };
+
         Self {
             system_prompt,
             max_iterations,
@@ -419,6 +505,7 @@ impl AutoPromptConfig {
             orchestration_provider,
             local_routing: None,
             verdict_log_path,
+            call_timeouts,
         }
     }
 

@@ -14,14 +14,15 @@ pub mod routing;
 
 pub use config::AutoPromptConfig;
 pub use config::{
-    CloudFallbackConfig, CompactionConfig, LocalRoutingConfig, OrchestrationProvider, TierConfig,
+    CallTimeouts, CloudFallbackConfig, CompactionConfig, LocalRoutingConfig, OrchestrationProvider,
+    TierConfig,
 };
 pub use context::{AutoPromptContext, AutoPromptResponse, PlanFileContent, StopPhase};
 
 use acp::schema::{SessionId, StopReason};
 use agent_client_protocol as acp;
 use anyhow::Context as _;
-use futures::{StreamExt, future, pin_mut};
+use futures::{StreamExt, future};
 use gpui::App;
 use language_model::{
     LanguageModel, LanguageModelCompletionEvent, LanguageModelRequest, LanguageModelRequestMessage,
@@ -359,6 +360,9 @@ pub struct LlmCallData {
     /// Current stop lifecycle phase (Working, PreStop, Verified).
     /// Used to scope the handbrake to post-verification only.
     pub stop_phase: context::StopPhase,
+    /// Streaming-call timeout tiers (Plan 008). Two-tier per-event timeout:
+    /// generous first-token window + tight per-event window + total backstop.
+    pub call_timeouts: CallTimeouts,
 }
 
 impl std::fmt::Debug for LlmCallData {
@@ -387,6 +391,7 @@ impl std::fmt::Debug for LlmCallData {
             .field("actual_input_tokens", &self.actual_input_tokens)
             .field("had_error", &self.had_error)
             .field("stop_phase", &self.stop_phase)
+            .field("call_timeouts", &self.call_timeouts)
             .finish()
     }
 }
@@ -804,6 +809,7 @@ pub fn decide(
         actual_input_tokens: auto_prompt_ctx.actual_input_tokens,
         had_error: auto_prompt_ctx.had_error,
         stop_phase,
+        call_timeouts: config.call_timeouts,
     })
 }
 
@@ -1078,6 +1084,7 @@ pub async fn decide_with_llm(
                 &data.model,
                 second_opinion_system,
                 &second_opinion_context,
+                &data.call_timeouts,
                 cx,
             )
             .await
@@ -1194,7 +1201,14 @@ pub async fn decide_with_llm(
                             .timer(Duration::from_millis(delay))
                             .await;
                     }
-                    match call_language_model(&data.model, retry_system, &lightweight_ctx, cx).await
+                    match call_language_model(
+                        &data.model,
+                        retry_system,
+                        &lightweight_ctx,
+                        &data.call_timeouts,
+                        cx,
+                    )
+                    .await
                     {
                         Ok((_raw, parsed)) => {
                             let is_retry_synthetic = parsed.confidence.unwrap_or(1.0) <= 0.3
@@ -1992,6 +2006,7 @@ pub(crate) async fn call_language_model(
     model: &Arc<dyn LanguageModel>,
     system_prompt: &str,
     context_json: &str,
+    timeouts: &CallTimeouts,
     cx: &gpui::AsyncApp,
 ) -> anyhow::Result<(String, AutoPromptResponse)> {
     let request = LanguageModelRequest {
@@ -2023,40 +2038,80 @@ pub(crate) async fn call_language_model(
         let mut stream_errors: Vec<anyhow::Error> = Vec::new();
         let mut total_events: u32 = 0;
         let mut other_event_types: Vec<String> = Vec::new();
-        while let Some(event) = stream.next().await {
-            total_events += 1;
-            match event {
-                Ok(LanguageModelCompletionEvent::Text(text)) => {
-                    log::debug!(
-                        "auto_prompt: stream event #{}: Text ({} chars)",
-                        total_events,
-                        text.len()
-                    );
-                    text_parts.push(text);
+        let started = std::time::Instant::now();
+        let total = timeouts.total();
+        let first_token = timeouts.first_token();
+        let per_event = timeouts.per_event();
+        let mut got_first_token = false;
+        loop {
+            // Total backstop — bounds runaway streams regardless of per-event progress.
+            if started.elapsed() >= total {
+                anyhow::bail!(
+                    "auto_prompt: stream exceeded total backstop ({total:?}; {n} events so far)",
+                    n = total_events
+                );
+            }
+            // Two-tier per-event window: generous for the first token (slow TTFT on
+            // large-context prefill), tight thereafter (catch a genuinely stalled stream).
+            let window = if got_first_token {
+                per_event
+            } else {
+                first_token
+            };
+            match future::select(stream.next(), cx.background_executor().timer(window)).await {
+                future::Either::Left((Some(event), _)) => {
+                    got_first_token = true;
+                    total_events += 1;
+                    match event {
+                        Ok(LanguageModelCompletionEvent::Text(text)) => {
+                            log::debug!(
+                                "auto_prompt: stream event #{}: Text ({} chars)",
+                                total_events,
+                                text.len()
+                            );
+                            text_parts.push(text);
+                        }
+                        Ok(LanguageModelCompletionEvent::Thinking { text, .. }) => {
+                            log::debug!(
+                                "auto_prompt: stream event #{}: Thinking ({} chars)",
+                                total_events,
+                                text.len()
+                            );
+                            thinking_parts.push(text);
+                        }
+                        Ok(ref other) => {
+                            let type_name = format!("{other:?}");
+                            let short = type_name.chars().take(60).collect::<String>();
+                            log::debug!(
+                                "auto_prompt: stream event #{}: Other: {short}",
+                                total_events
+                            );
+                            other_event_types.push(short);
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "auto_prompt: stream event #{}: Error: {err:#}",
+                                total_events
+                            );
+                            stream_errors.push(err.into());
+                        }
+                    }
                 }
-                Ok(LanguageModelCompletionEvent::Thinking { text, .. }) => {
-                    log::debug!(
-                        "auto_prompt: stream event #{}: Thinking ({} chars)",
-                        total_events,
-                        text.len()
-                    );
-                    thinking_parts.push(text);
-                }
-                Ok(ref other) => {
-                    let type_name = format!("{other:?}");
-                    let short = type_name.chars().take(60).collect::<String>();
-                    log::debug!(
-                        "auto_prompt: stream event #{}: Other: {short}",
-                        total_events
-                    );
-                    other_event_types.push(short);
-                }
-                Err(err) => {
+                future::Either::Left((None, _)) => break, // stream ended normally
+                future::Either::Right(_) => {
+                    let phase = if got_first_token {
+                        "per-event"
+                    } else {
+                        "first-token (TTFT)"
+                    };
                     log::warn!(
-                        "auto_prompt: stream event #{}: Error: {err:#}",
-                        total_events
+                        "auto_prompt: stream stalled — no event for {window:?} ({phase}; {n} events so far)",
+                        n = total_events
                     );
-                    stream_errors.push(err.into());
+                    anyhow::bail!(
+                        "auto_prompt: stream stalled — no event for {window:?} ({phase}; {n} events so far)",
+                        n = total_events
+                    );
                 }
             }
         }
@@ -2149,18 +2204,11 @@ pub(crate) async fn call_language_model(
         }
     };
 
-    let timeout_future = cx.background_executor().timer(Duration::from_secs(60));
-
-    pin_mut!(completion_future, timeout_future);
-
-    match future::select(completion_future, timeout_future).await {
-        future::Either::Left((Ok(response_text), _)) => {
-            parse_response(&response_text).map(|parsed| (response_text, parsed))
-        }
-        future::Either::Left((Err(err), _)) => Err(err.context("auto_prompt: completion failed")),
-        future::Either::Right(_) => {
-            anyhow::bail!("auto_prompt: LLM call timed out after 60 seconds");
-        }
+    // Plan 008: the timeout now lives INSIDE completion_future's stream loop
+    // (two-tier per-event timeout). The old monolithic 60s race is gone.
+    match completion_future.await {
+        Ok(response_text) => parse_response(&response_text).map(|parsed| (response_text, parsed)),
+        Err(err) => Err(err.context("auto_prompt: completion failed")),
     }
 }
 
