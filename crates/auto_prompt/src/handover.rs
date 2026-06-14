@@ -28,7 +28,11 @@ impl HandoverBlock {
         let mut lines: Vec<String> = Vec::new();
         lines.push("<handover>".into());
 
-        if let Some(intent) = self.original_intent.as_ref().filter(|s| !s.trim().is_empty()) {
+        if let Some(intent) = self
+            .original_intent
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
             lines.push(format!("original_intent: {}", escape_yaml_scalar(intent)));
         }
         if !self.completed.is_empty() {
@@ -71,11 +75,18 @@ impl HandoverBlock {
 
     /// True when every field is empty/None. Used to skip emitting empty blocks.
     pub fn is_empty(&self) -> bool {
-        self.original_intent.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+        self.original_intent
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
             && self.completed.is_empty()
             && self.in_progress.is_empty()
             && self.blocked_on.is_empty()
-            && self.next_step.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+            && self
+                .next_step
+                .as_ref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
             && self.files_touched.is_empty()
             && self.active_plans.is_empty()
     }
@@ -111,7 +122,10 @@ pub fn synthesize_fallback(
         block.original_intent = Some(truncate_to_chars(msg, 240));
     }
 
-    if let Some(last) = last_assistant_message.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(last) = last_assistant_message
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         // Heuristic: treat the last assistant message as the in-progress state.
         // It's often a status update. Truncate hard — the new thread can ask
         // for details; the goal is just to point it in the right direction.
@@ -264,7 +278,10 @@ mod tests {
             Some("I edited auth.rs and ran tests"),
             &["042_login".into()],
         );
-        assert_eq!(block.original_intent.as_deref(), Some("please fix the bug in auth"));
+        assert_eq!(
+            block.original_intent.as_deref(),
+            Some("please fix the bug in auth")
+        );
         assert_eq!(block.in_progress.len(), 1);
         assert!(block.in_progress[0].contains("edited auth.rs"));
         assert_eq!(block.active_plans, vec!["042_login".to_string()]);

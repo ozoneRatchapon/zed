@@ -396,9 +396,7 @@ impl AutoPromptConfig {
             .ok()
             .and_then(|v| match v.to_ascii_lowercase().as_str() {
                 "auto" => Some(OrchestrationProvider::Auto),
-                "local_only" | "local-only" | "localonly" => {
-                    Some(OrchestrationProvider::LocalOnly)
-                }
+                "local_only" | "local-only" | "localonly" => Some(OrchestrationProvider::LocalOnly),
                 "cloud" => Some(OrchestrationProvider::Cloud),
                 _ => None,
             })

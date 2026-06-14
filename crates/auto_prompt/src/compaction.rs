@@ -76,7 +76,8 @@ pub fn compact_old_messages(
 
         let original = ctx.messages[idx].content.clone();
         let role = ctx.messages[idx].role.clone();
-        let (summary_text, _used_strategy) = summarize_message(&ctx.messages[idx], strategy.clone());
+        let (summary_text, _used_strategy) =
+            summarize_message(&ctx.messages[idx], strategy.clone());
         let reclaimed = original.len().saturating_sub(summary_text.len());
 
         // Record audit entry (FIFO cap).
@@ -96,8 +97,12 @@ pub fn compact_old_messages(
         stats.messages_compacted += 1;
         stats.bytes_reclaimed += reclaimed;
         match strategy {
-            CompactionStrategy::ToolCallMetadata => stats.strategy_breakdown.tool_call_metadata += 1,
-            CompactionStrategy::AssistantTruncated => stats.strategy_breakdown.assistant_truncated += 1,
+            CompactionStrategy::ToolCallMetadata => {
+                stats.strategy_breakdown.tool_call_metadata += 1
+            }
+            CompactionStrategy::AssistantTruncated => {
+                stats.strategy_breakdown.assistant_truncated += 1
+            }
             CompactionStrategy::AssistantLlmAbstracted => {
                 stats.strategy_breakdown.assistant_llm_abstracted += 1
             }
@@ -288,9 +293,7 @@ mod tests {
     use super::*;
 
     fn make_tool_call(label: &str, status: &str, input: &str, output: &str) -> ContextMessage {
-        let content = format!(
-            "[Tool: {label} ({status})]\nInput: {input}\nOutput: {output}"
-        );
+        let content = format!("[Tool: {label} ({status})]\nInput: {input}\nOutput: {output}");
         ContextMessage {
             role: ContextMessageRole::Tool,
             content,
@@ -367,7 +370,10 @@ mod tests {
         let stats = compact_old_messages(&mut ctx, 1, &policy(2));
 
         assert!(stats.messages_compacted >= 1);
-        assert!(stats.bytes_reclaimed > 4000, "should reclaim most of the 5KB output");
+        assert!(
+            stats.bytes_reclaimed > 4000,
+            "should reclaim most of the 5KB output"
+        );
         assert!(ctx.estimate_token_count() < tokens_before);
         assert!(ctx.was_truncated);
         assert_eq!(ctx.compaction_log.len(), 1);

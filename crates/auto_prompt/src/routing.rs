@@ -11,16 +11,13 @@
 //! `evaluate_response`, logging) is reused unchanged — this module only picks
 //! *which model to invoke*.
 
-
 use anyhow::Result;
 use gpui::AsyncApp;
 
-use crate::config::{
-    AutoPromptConfig, LocalRoutingConfig, OrchestrationProvider, TierConfig,
-};
+use crate::config::{AutoPromptConfig, LocalRoutingConfig, OrchestrationProvider, TierConfig};
 use crate::context::AutoPromptResponse;
 use crate::local_mlx;
-use crate::{call_language_model, LlmCallData};
+use crate::{LlmCallData, call_language_model};
 
 /// Coarse classification of the current orchestration decision.
 /// Drives tier selection. Computed by cheap string inspection on the context —
@@ -156,9 +153,7 @@ async fn try_tier(
     let (raw, response) = match outcome {
         Ok(pair) => pair,
         Err(err) => {
-            log::warn!(
-                "[auto_prompt::routing] tier {tier:?} call failed: {err:#} — escalating"
-            );
+            log::warn!("[auto_prompt::routing] tier {tier:?} call failed: {err:#} — escalating");
             return Ok(None);
         }
     };
@@ -184,8 +179,10 @@ async fn cloud_or_local_fail(
     config: &AutoPromptConfig,
     cx: &AsyncApp,
 ) -> Result<(String, AutoPromptResponse)> {
-    if matches!(config.orchestration_provider, OrchestrationProvider::LocalOnly)
-        && !cloud_fallback_enabled(&config.local_routing)
+    if matches!(
+        config.orchestration_provider,
+        OrchestrationProvider::LocalOnly
+    ) && !cloud_fallback_enabled(&config.local_routing)
     {
         log::warn!(
             "[auto_prompt::routing] LocalOnly + cloud fallback disabled — failing closed to Stop"
@@ -283,7 +280,11 @@ fn log_verdict(
         let _ = std::fs::create_dir_all(parent);
     }
     let line = format!("{}\n", record);
-    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         Ok(mut f) => {
             let _ = f.write_all(line.as_bytes());
         }
@@ -292,4 +293,3 @@ fn log_verdict(
         }
     }
 }
-
