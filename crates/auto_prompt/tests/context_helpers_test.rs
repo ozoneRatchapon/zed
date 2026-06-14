@@ -23,6 +23,8 @@ fn default_context() -> AutoPromptContext {
         stop_phase: StopPhase::Working,
         verification_count: 0,
         was_truncated: false,
+        compaction_log: vec![],
+        fork_imminent: false,
         plan_has_checkboxes: false,
         first_plan_filename: String::new(),
         plan_number: String::new(),
