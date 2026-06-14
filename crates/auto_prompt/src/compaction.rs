@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn summarize_tool_call_extracts_label_and_status() {
-        let content = "[Tool: terminal (completed)]\nInput: cargo build\nOutput: x".repeat(1);
+        let content = "[Tool: terminal (completed)]\nInput: cargo build\nOutput: x".to_string();
         let summary = summarize_tool_call(&content);
         assert!(summary.starts_with("[compacted:Tool"));
         assert!(summary.contains("terminal"));
