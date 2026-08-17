@@ -191,15 +191,20 @@ impl Default for LocalRoutingConfig {
         Self {
             enabled: false,
             health_check_ms: default_health_check_ms(),
+            // Ollama exposes an OpenAI-compatible surface at /v1 — the same two
+            // endpoints local_mlx uses (GET /v1/models, POST /v1/chat/completions)
+            // — so both tiers share ONE already-running server instead of two
+            // mlx_lm.server processes on 8081/8082. Verified against Ollama
+            // 0.32.13 with the exact body local_mlx::call sends.
             t1: TierConfig {
-                endpoint: "http://127.0.0.1:8081/v1".into(),
-                model: "mlx-community/Llama-3.2-1B-Instruct-4bit".into(),
+                endpoint: "http://127.0.0.1:11434/v1".into(),
+                model: "qwen3:0.6b".into(),
                 confidence_threshold: 0.85,
                 timeout_ms: 4_000,
             },
             t2: TierConfig {
-                endpoint: "http://127.0.0.1:8082/v1".into(),
-                model: "mlx-community/gemma-4-E4B-it-qat-4bit".into(),
+                endpoint: "http://127.0.0.1:11434/v1".into(),
+                model: "gemma4:26b".into(),
                 confidence_threshold: 0.70,
                 timeout_ms: 15_000,
             },

@@ -49,6 +49,14 @@ pub async fn call(
         .context("local_mlx: failed to build HTTP client")?;
 
     // workspace `reqwest` (zed-reqwest) has no `json` feature — serialize manually.
+    //
+    // `reasoning_effort: "none"` disables thinking on servers that honour it
+    // (Ollama does; mlx_lm.server ignores unknown fields). Orchestration wants
+    // a small JSON verdict, so chain-of-thought is pure latency here — measured
+    // 0.6s -> 0.2s (qwen3:0.6b) and 1.6s -> 0.5s (gemma4:26b) on an M5 Pro.
+    // It also removes a failure mode: with thinking ON and a capped response,
+    // the budget is spent on `reasoning` and `content` comes back EMPTY, which
+    // parse_response turns into a confidence-0 stop — escalating every call.
     let body = serde_json::json!({
         "model": model,
         "messages": [
@@ -57,6 +65,7 @@ pub async fn call(
         ],
         "stream": false,
         "temperature": 0.0,
+        "reasoning_effort": "none",
     });
     let body_bytes = serde_json::to_vec(&body).context("local_mlx: encode request body")?;
 
