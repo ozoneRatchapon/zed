@@ -1,0 +1,242 @@
+[
+ {
+  "text": "I have implemented the core logic for the `AuthService`, but there is still remaining work regarding session persistence. The next steps are: \n1. Implement JWT refresh token logic in `auth_middleware.py`.\n2. Add unit tests for token expiration scenarios.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully refactored the database schema, but I still need to update the repository layer to match the new models. My remaining work includes:\n1. Updating `user_repository.py` with the new field mappings.\n2. Fixing the broken migration script in `/migrations/v2_update.sql`.",
+  "label": "remaining"
+ },
+ {
+  "text": "The API endpoints for the user profile are functional, but the task is unfinished as I haven't addressed the validation logic. TODO:\n1. Add regex validation for the email field in `schemas.py`.\n2. Implement file size limits for the profile picture upload.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have completed the basic UI components for the dashboard, but the data binding is not yet operational. Next steps:\n1. Connect the `DashboardCard` component to the `useFetchData` hook.\n2. Implement a loading skeleton state for `ChartComponent.tsx`.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have started the migration from Python 3.8 to 3.11, but there is significant remaining work in the dependency files. I still need to:\n1. Update `requirements.txt` with compatible versions for `SQLAlchemy`.\n2. Audit `setup.py` for deprecated build tools.",
+  "label": "remaining"
+ },
+ {
+  "text": "The integration tests for the payment gateway are written, but they are currently failing due to missing mocks. My next steps are:\n1. Create mock responses for the Stripe API in `tests/test_payments.py`.\n2. Configure the environment variables for the test runner.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have implemented the CSS grid layout for the main landing page, but the responsiveness is still incomplete. TODO:\n1. Add media queries for mobile viewports in `styles/main.css`.\n2. Fix the overlapping text issue in the `HeroSection` component.",
+  "label": "remaining"
+ },
+ {
+  "text": "The logic for calculating the monthly interest rate is implemented, but the edge cases are not yet handled. I still need to:\n1. Add a check for zero-value inputs in `finance_engine.py`.\n2. Implement a regression test for negative interest rates.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully integrated the Redis cache, but the cache invalidation logic is missing. Remaining work:\n1. Implement the `invalidate_user_cache` function in `cache_manager.py`.\n2. Update `get_user_profile` to check the cache before hitting the DB.",
+  "label": "remaining"
+ },
+ {
+  "text": "The Dockerfile has been updated for the new environment, but the orchestration layer still needs adjustment. Next steps:\n1. Update `docker-compose.yml` to include the new `redis` service.\n2. Add a health check instruction to the `app` container.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have drafted the documentation for the new API endpoints, but the actual implementation of the Swagger UI is pending. TODO:\n1. Configure `FastAPI` to auto-generate the OpenAPI schema.\n2. Add detailed parameter descriptions to `routes/orders.py`.",
+  "label": "remaining"
+ },
+ {
+  "text": "The data ingestion script is working for CSV files, but I still need to extend support to JSON format. My remaining work is:\n1. Create a `JSONParser` class in `parsers/json_handler.py`.\n2. Update the main `ingest.py` loop to detect file extensions.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have implemented the basic error handling wrapper, but I haven't integrated it into the existing controllers. I still need to:\n1. Decorate all methods in `api/controllers/v1/` with `@handle_errors`.\n2. Define custom exception classes in `exceptions/base.py`.",
+  "label": "remaining"
+ },
+ {
+  "text": "The unit tests for the sorting algorithm are passing, but I haven't implemented the integration tests with the database. Next steps:\n1. Write an integration test in `tests/integration/test_db_sort.py`.\n2. Ensure the `OrderService` correctly calls the `SortRepository`.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have updated the deployment script to use the new S3 bucket, but the cleanup logic is still missing. TODO:\n1. Add a step to delete old build artifacts in `deploy.sh`.\n2. Implement an automated notification to Slack upon deployment success.",
+  "label": "remaining"
+ },
+ {
+  "text": "I successfully implemented the user schema in `models/user.py`, but the migration script failed to run against the local database. The `migrations/001_init.py` file contains the logic, but the actual table creation was interrupted by a connection timeout. I will need to verify the schema once the database is reachable.",
+  "label": "remaining"
+ },
+ {
+  "text": "The API endpoints for the product catalog are functional, though the integration with the Redis cache layer is incomplete. I managed to update `routes/products.py`, but the caching decorator is currently missing from the `get_product` function. The latency benefits won't be visible until that logic is applied.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have refactored the database connection utility, but I haven't had a chance to update the unit tests in `tests/test_db.py`. Several test cases are currently hitting a broken mock implementation. The test suite will likely fail until I synchronize the new interface with the existing test mocks.",
+  "label": "remaining"
+ },
+ {
+  "text": "The CSS overhaul for the dashboard is finished for the main container, but the sidebar components are still using the old legacy styles. I was unable to migrate `components/Sidebar.tsx` to the new Tailwind configuration. The layout will look inconsistent until that file is updated.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have added the necessary environment variables to the `.env.example` file. However, the actual validation logic in `config/validator.py` does not yet recognize the new `STRIPE_SECRET_KEY` field. The application will throw a configuration error if this isn't addressed.",
+  "label": "remaining"
+ },
+ {
+  "text": "The logic for processing credit card payments is now in `services/payment_service.py`, but the webhook handler for Stripe is missing. I managed to mock the response, but there is no actual endpoint listening for asynchronous notifications. This will prevent successful transaction verification.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have updated the dependency versions in `package.json`, but the build pipeline in `.github/workflows/ci.yml` is currently broken. The new version of Node.js is causing a mismatch in the caching step. The CI/CD pipeline needs a configuration adjustment to pass.",
+  "label": "remaining"
+ },
+ {
+  "text": "The data ingestion script for the CSV parser is working for small files. However, I was unable to implement the chunking logic required for large datasets in `scripts/ingest.py`. Large file uploads will likely cause memory exhaustion errors until that optimization is finished.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully implemented the login functionality using JWT. The logout process, specifically the token blacklisting logic in `auth_middleware.py`, was not addressed. Currently, expired tokens are not being invalidated correctly on the server side.",
+  "label": "remaining"
+ },
+ {
+  "text": "The documentation for the new API endpoints has been drafted in `docs/api.md`. I haven't integrated the actual code examples or the Swagger UI schema into the markdown file. Users won't be able to test the requests directly from the docs until that's done.",
+  "label": "remaining"
+ },
+ {
+  "text": "I managed to fix the SQL injection vulnerability in the search query within `controllers/searchController.js`. The cleanup of the remaining prepared statements in the `filters` module was not completed. Some queries are still using raw string concatenation.",
+  "label": "remaining"
+ },
+ {
+  "text": "The implementation of the file upload feature to S3 is complete for the backend. I was unable to add the progress bar component to the `FileUpload.vue` frontend component. Users will see a simple loading spinner instead of real-time progress.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have updated the data models to include the `middle_name` field. The mapping logic in the `UserSerializer` class in `serializers/user_serializer.py` was not updated to include this new attribute. This means the field won't appear in the JSON responses.",
+  "label": "remaining"
+ },
+ {
+  "text": "The integration of the SendGrid SDK is finished for the welcome emails. I haven't yet set up the error handling and retry logic for when the API returns a 429 rate limit error. The system might drop emails during periods of high traffic.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully converted the legacy JavaScript functions to TypeScript in `utils/helpers.ts`. The type definitions for the complex nested objects in `types/api_responses.ts` were not created. This will result in several 'any' types being used throughout the utility functions.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have implemented the new authentication middleware and verified it against the existing user session logic. All unit tests in `tests/auth_test.py` are passing, and the API documentation in `docs/auth.md` has been updated. No further changes are required.",
+  "label": "done"
+ },
+ {
+  "text": "The refactoring of the `DatabaseConnector` class is complete, including the implementation of the new connection pooling logic. I have updated all dependent services in `src/services/` to ensure compatibility. All integration tests passed successfully.",
+  "label": "done"
+ },
+ {
+  "text": "I have successfully integrated the Stripe API for handling subscription renewals. The new webhook handler in `api/webhooks.py` is fully operational, and I've added the necessary environment variable templates to `.env.example`. The task is finished.",
+  "label": "done"
+ },
+ {
+  "text": "The bug causing the memory leak in the image processing pipeline has been resolved by implementing proper buffer cleanup in `processors/image_engine.py`. I have verified the fix with a long-running stress test. The PR is ready for review.",
+  "label": "done"
+ },
+ {
+  "text": "I have added the requested 'export to CSV' functionality to the reporting module. The new logic in `reports/exporter.py` has been unit tested, and the UI button has been added to `components/ReportTable.tsx`. All tests are green.",
+  "label": "done"
+ },
+ {
+  "text": "The migration script for upgrading the user schema from v1 to v2 has been written and tested against a local Docker instance. I have also updated the `schema.sql` file to reflect the new constraints. The database upgrade process is now complete.",
+  "label": "done"
+ },
+ {
+  "text": "I have optimized the SQL queries in `repository/order_repository.py` to reduce latency during peak loads. The execution plans show a significant reduction in full table scans. The performance regression tests confirm the improvement.",
+  "label": "done"
+ },
+ {
+  "text": "The implementation of the dark mode toggle in the frontend is complete. I have updated the global CSS variables in `styles/theme.css` and ensured all components in `src/components/` respond correctly to the theme change. No leftover styling tasks remain.",
+  "label": "done"
+ },
+ {
+  "text": "I have added comprehensive error handling to the file upload service in `services/upload_service.py`. The system now correctly handles multipart/form-data errors and disk space exceptions. All edge-case tests in `tests/upload_tests.py` are passing.",
+  "label": "done"
+ },
+ {
+  "text": "The README.md has been updated with the new installation instructions for the Redis dependency. I have also added a troubleshooting section for common Docker configuration errors. The setup documentation is now up to date.",
+  "label": "done"
+ },
+ {
+  "text": "I have implemented the new data validation layer using Pydantic models in `models/schemas.py`. This ensures all incoming requests to the `/api/v1/data` endpoint are strictly typed. I have updated the corresponding integration tests to reflect these changes.",
+  "label": "done"
+ },
+ {
+  "text": "The deployment configuration for GitHub Actions has been updated to include the new deployment stage for the staging environment. The workflow file `.github/workflows/deploy.yml` is now fully configured with the necessary secrets. The CI/CD pipeline is ready.",
+  "label": "done"
+ },
+ {
+  "text": "I have completed the migration of the legacy logging system to the new structured JSON logging format. All loggers in `src/utils/logger.py` now output compatible formats for ELK stack ingestion. I have verified the logs with the new parsing rules.",
+  "label": "done"
+ },
+ {
+  "text": "The implementation of the multi-factor authentication (MFA) flow is finished, including the TOTP generation logic in `auth/mfa.py`. I have updated the login flow in the frontend to handle the second-factor challenge. All security tests passed.",
+  "label": "done"
+ },
+ {
+  "text": "I have cleaned up the unused dependencies in `package.json` and updated the lockfile. I also removed the deprecated helper functions from `utils/helpers.js` that were no longer being imported. The build process is now leaner and more efficient.",
+  "label": "done"
+ },
+ {
+  "text": "I have successfully implemented the user authentication flow and verified it with new integration tests. The `auth_service.py` and `middleware.py` files are fully updated. There is no remaining work to be done on this task.",
+  "label": "done"
+ },
+ {
+  "text": "The database migration for the orders table is complete and all schema constraints have been validated. I have updated `models.py` and ran the migration script. No next steps are required for this feature.",
+  "label": "done"
+ },
+ {
+  "text": "I have refactored the `api_v1` controllers to use the new dependency injection pattern. All unit tests in `test_controllers.py` are now passing. You no longer need to do anything regarding this refactor.",
+  "label": "done"
+ },
+ {
+  "text": "The bug in the `payment_gateway.py` logic has been resolved and the edge case for expired cards is covered. I have added a regression test in `test_payments.py`. There is no further work needed.",
+  "label": "done"
+ },
+ {
+  "text": "I have finished integrating the Stripe webhooks into the `webhook_handler.py` module. The following were completed:\n- Created webhook endpoint\n- Implemented signature verification\n- Added event logging\nThere is no remaining work on this ticket.",
+  "label": "done"
+ },
+ {
+  "text": "The CSS overhaul for the dashboard is finished and all components in `dashboard_styles.css` are responsive. I have also updated the `Layout.tsx` component. No next steps are needed.",
+  "label": "done"
+ },
+ {
+  "text": "I have implemented the data export functionality in `export_utils.py` for CSV and PDF formats. All existing tests in `test_export.py` passed successfully. You no longer need to perform any manual verification.",
+  "label": "done"
+ },
+ {
+  "text": "The performance bottleneck in `query_builder.py` has been eliminated through query caching. I have updated the `CacheManager` class as well. No remaining work is required for this optimization.",
+  "label": "done"
+ },
+ {
+  "text": "I have completed the documentation update for the internal API. The following files were updated:\n- `api_docs.md`\n- `swagger_spec.yaml`\n- `README.md`\nThere are no next steps for this documentation task.",
+  "label": "done"
+ },
+ {
+  "text": "The error handling logic in `network_client.py` is now robust against timeouts and connection resets. I have added comprehensive error logging to `logger.py`. There is no further work to be done.",
+  "label": "done"
+ },
+ {
+  "text": "I have successfully migrated the legacy `UserStore` to the new Redis-backed implementation. All tests in `test_user_store.py` have passed. You no longer need to touch the storage layer.",
+  "label": "done"
+ },
+ {
+  "text": "The UI theme toggle feature is fully implemented across all components in `theme_provider.tsx`. I have also updated the `global_styles.css` file. No next steps are required.",
+  "label": "done"
+ },
+ {
+  "text": "I have finished the cleanup of the `utils/` directory, removing all deprecated functions. The following were handled:\n- Removed `old_parser.py`\n- Refactored `date_helpers.py`\n- Updated `string_utils.py`\nThere is no remaining work.",
+  "label": "done"
+ },
+ {
+  "text": "The security patch for the `session_manager.py` is complete and the CSRF protection is active. I have verified this by running the security suite in `tests/security/`. No further work is needed.",
+  "label": "done"
+ },
+ {
+  "text": "The automated deployment script `deploy.sh` has been updated to support the new staging environment. I have tested the script against the new server configuration. There are no next steps for this deployment update.",
+  "label": "done"
+ }
+]

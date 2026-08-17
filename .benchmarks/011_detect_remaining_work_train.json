@@ -1,0 +1,366 @@
+[
+ {
+  "text": "I've implemented the core logic for the authentication middleware, but the session validation is incomplete. Next steps: implement `validateSessionToken` in `auth_service.py` and add unit tests in `tests/test_auth.py` to cover expired tokens.",
+  "label": "remaining"
+ },
+ {
+  "text": "The API endpoints for user registration are functional, but the database migration is pending. Please run `alembic upgrade head` and then verify that the `users` table contains the new `phone_number` column in `schema.sql`.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have updated the UI components for the dashboard, but the data fetching logic is still using hardcoded mocks. You need to replace `mockData.ts` with real calls to the `/api/v1/stats` endpoint and implement error handling for 404 responses.",
+  "label": "remaining"
+ },
+ {
+  "text": "The refactoring of the `PaymentProcessor` class is done, but the integration tests are failing due to missing environment variables. TODO: Update `.env.example` with `STRIPE_SECRET_KEY` and fix the broken assertion in `integration/test_payments.py`.",
+  "label": "remaining"
+ },
+ {
+  "text": "I've added the basic structure for the WebSockets implementation in `socket_manager.js`. However, the heartbeat mechanism and reconnection logic are not yet implemented. You'll need to add a `ping/pong` interval and handle `onclose` events.",
+  "label": "remaining"
+ },
+ {
+  "text": "The CSS for the new landing page is complete, but the responsive breakpoints for mobile devices are missing. Please check `styles/main.css` and add media queries for screens smaller than 768px, specifically for the `.hero-section`.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully integrated the Stripe SDK, but the webhook endpoint handler is currently a placeholder. Next steps: implement the signature verification logic in `api/webhooks.py` and write a test case to simulate a `payment_intent.succeeded` event.",
+  "label": "remaining"
+ },
+ {
+  "text": "The logic for calculating tax in `order_utils.py` is implemented, but it doesn't account for international VAT rates yet. You need to update the `get_tax_rate` function to accept a `country_code` argument and add the corresponding logic for EU regions.",
+  "label": "remaining"
+ },
+ {
+  "text": "I've scaffolded the new microservice in the `/services/billing` directory, but the Dockerfile and deployment scripts are missing. Please create a `Dockerfile` and a `docker-compose.yml` entry to allow this service to communicate with the `postgres` container.",
+  "label": "remaining"
+ },
+ {
+  "text": "The data processing pipeline in `etl_job.py` is running, but there is no logging for failed rows. TODO: Implement a `log_error_to_s3` function and ensure that each transformation step is wrapped in a try-except block that writes to `error_logs/`.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have updated the TypeScript interfaces in `types/user.ts` to include the new profile fields. However, you must now go through `components/UserProfile.tsx` and `forms/EditProfile.ts` to update the form validation schema to match these changes.",
+  "label": "remaining"
+ },
+ {
+  "text": "The caching layer using Redis is partially implemented in `cache_layer.py`. You still need to implement the cache invalidation logic for when a `user_profile_update` event is received from the message queue.",
+  "label": "remaining"
+ },
+ {
+  "text": "I've finished the basic CRUD operations for the `Inventory` module, but the concurrency control is missing. Please implement optimistic locking in the `update_stock` method of `inventory_repository.py` using a version column.",
+  "label": "remaining"
+ },
+ {
+  "text": "The documentation for the new internal API has been drafted in `docs/api_spec.md`. However, the updated request/response examples for the `POST /batch-upload` endpoint are missing and need to be manually verified against the code.",
+  "label": "remaining"
+ },
+ {
+  "text": "I've modified the background worker to handle larger payloads, but the memory usage is spiking. You need to implement chunked processing in `worker_loop.py` and add a `max_chunk_size` configuration parameter to `config.yaml`.",
+  "label": "remaining"
+ },
+ {
+  "text": "The search functionality in `search_controller.py` is working for exact matches, but fuzzy searching is not yet integrated. Next steps: integrate the `Levenshtein` distance library and update the `search_query` function to use partial matches.",
+  "label": "remaining"
+ },
+ {
+  "text": "I've added the frontend routing for the admin panel in `App.js`, but the protected route guards are not yet active. Please implement the `PrivateRoute` component and wrap the `/admin/*` routes with an `authCheck` higher-order component.",
+  "label": "remaining"
+ },
+ {
+  "text": "The migration from `moment.js` to `date-fns` is halfway through in `utils/date_helpers.js`. You need to find and replace all remaining `moment().format()` calls with `format()` from `date-fns` and update the dependency in `package.json`.",
+  "label": "remaining"
+ },
+ {
+  "text": "I hit a wall with the authentication middleware implementation in `auth_service.py`. The integration tests for the JWT decoding logic are failing because of a mismatch in the secret key configuration. I cannot proceed with the user logout logic until this is resolved.",
+  "label": "remaining"
+ },
+ {
+  "text": "The refactor of `database_manager.py` was interrupted by a circular dependency error between the schema module and the engine factory. This prevents the migrations from running correctly. I couldn't finish the migration script for the `users` table.",
+  "label": "remaining"
+ },
+ {
+  "text": "The logic in `payment_processor.py` is incomplete due to an unhandled exception during the Stripe API handshake simulation. The unit tests for the refund flow are currently breaking the build. I wasn't able to implement the webhook listener.",
+  "label": "remaining"
+ },
+ {
+  "text": "The complex regex patterns in `url_parser.py` are causing the parser to hang on long strings. I couldn't finish the edge case handling for nested subdomains. The test suite is currently blocked by this timeout issue.",
+  "label": "remaining"
+ },
+ {
+  "text": "I ran into a permission error while trying to write the generated documentation to the `docs/api/` directory. This stopped the automated docstring extraction process for `api_endpoints.py`. The deployment script is unable to access the target folder.",
+  "label": "remaining"
+ },
+ {
+  "text": "The implementation of the caching layer in `cache_provider.py` is broken because the Redis connection pool fails to initialize. This prevents the cache-aside pattern from being applied to the `get_user_profile` function. The integration with the main app is unstable.",
+  "label": "remaining"
+ },
+ {
+  "text": "The logic for the file upload handler in `storage_controller.py` is missing the multipart boundary validation. This leads to a crash when processing large buffer streams. I couldn't implement the cleanup routine for temporary files.",
+  "label": "remaining"
+ },
+ {
+  "text": "The state machine in `workflow_engine.py` is stuck in an undefined state during the transition from 'PENDING' to 'PROCESSING'. This is causing the background worker to crash. I couldn't add the error recovery logic.",
+  "label": "remaining"
+ },
+ {
+  "text": "I encountered a type mismatch in `models.py` that is causing the SQLAlchemy engine to reject the new migrations. This prevents the creation of the `transaction_logs` table. The validation logic for the timestamp field is also broken.",
+  "label": "remaining"
+ },
+ {
+  "text": "The implementation of the CSS grid layout in `dashboard_styles.css` is visually broken on mobile viewports. The media queries for small screens are overriding the main container width. I couldn't fix the overlapping elements issue.",
+  "label": "remaining"
+ },
+ {
+  "text": "The encryption utility in `security_utils.py` is throwing a padding error when processing certain byte sequences. This makes the data retrieval from `encrypted_storage.db` impossible. I couldn't verify the integrity of the decryption routine.",
+  "label": "remaining"
+ },
+ {
+  "text": "The loop in `data_aggregator.py` is consuming excessive memory when processing the large CSV input. This leads to an OOM error during the aggregation phase. I wasn't able to implement the chunked processing logic.",
+  "label": "remaining"
+ },
+ {
+  "text": "The dependency injection in `service_container.py` is failing to resolve the `Logger` interface. This is causing the entire application bootstrap to fail. The configuration loading for the environment variables is also incomplete.",
+  "label": "remaining"
+ },
+ {
+  "text": "The implementation of the rate limiter in `api_gateway.py` is incorrectly blocking legitimate requests from the internal service subnet. This is triggering false positives in the monitoring dashboard. I couldn't adjust the window sliding logic.",
+  "label": "remaining"
+ },
+ {
+  "text": "The unit tests in `test_algorithm_core.py` are failing due to a regression in the sorting logic. This breaks the entire test runner for the math module. I couldn't isolate the specific boundary condition causing the error.",
+  "label": "remaining"
+ },
+ {
+  "text": "The implementation of the WebSocket heartbeat in `socket_manager.py` is losing connection stability under high latency simulations. This leads to frequent client disconnections. The reconnection backoff strategy is not functioning.",
+  "label": "remaining"
+ },
+ {
+  "text": "The integration between `notification_service.py` and the SMTP server is failing the handshake test. This prevents the sending of welcome emails to new users. The template rendering logic is also currently broken.",
+  "label": "remaining"
+ },
+ {
+  "text": "The data transformation logic in `etl_pipeline.py` is producing malformed JSON outputs for the nested dictionary structures. This causes the downstream ingestion script to crash. I couldn't implement the schema validation step.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully implemented the `AuthMiddleware` class, but I ran into a circular dependency error when trying to integrate it with `user_service.py`. I've left the dependency injection logic commented out for now. You will need to resolve the import loop before the tests can pass.",
+  "label": "remaining"
+ },
+ {
+  "text": "The database migration script for `orders_table` is complete and verified against the schema. However, I couldn't update the `OrderRepository` because the new field names conflict with the existing legacy mapping. I've skipped the repository update to avoid breaking the current build.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully refactored the `calculate_tax` function in `pricing_logic.py` to use the new API. I was unable to update the associated unit tests in `test_pricing.py` due to a breaking change in the mock object structure. Please review the test failures before committing.",
+  "label": "remaining"
+ },
+ {
+  "text": "The implementation of the `FileUploadService` is functional for local storage. I hit a timeout error when attempting to configure the AWS S3 integration in `storage_config.py`. I have deferred the cloud storage setup to a separate task.",
+  "label": "remaining"
+ },
+ {
+  "text": "I managed to implement the UI components for the `DashboardView`, but the data fetching logic in `useDashboardData.ts` is still using placeholder mock data. The connection to the real WebSocket stream is not yet established. You'll need to wire up the actual socket endpoint.",
+  "label": "remaining"
+ },
+ {
+  "text": "The core logic for the `payment_processor.py` is implemented and passes basic smoke tests. I had to skip the edge-case handling for international currency conversions because the exchange rate API is currently unreachable. This remains a known gap in the current PR.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully added the `EmailNotification` template to the `templates/` directory. However, the integration within `notification_manager.py` is incomplete as the logic to trigger emails on user signup was too complex to finish in this session. I have left a TODO comment near the signup flow.",
+  "label": "remaining"
+ },
+ {
+  "text": "The `Logger` utility now supports JSON formatting as requested. I was unable to implement the rotation logic in `file_handler.py` because of a permission error in the container environment. The logs will currently only append to a single file.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully refactored the `UserDto` to include the `middle_name` field. I was unable to update the `UserMapper` class because it would have required a simultaneous change to the legacy SQL queries in `db_queries.sql`. I have left the old mapping as a fallback.",
+  "label": "remaining"
+ },
+ {
+  "text": "The implementation of the `SearchService` successfully indexes the `products` collection. I could not implement the fuzzy matching logic in `search_engine.py` due to the missing `levenshtein` dependency in `requirements.txt`. I have left the search as an exact-match implementation for now.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully added the new CSS variables to `theme.css`. I was unable to apply these variables to the `Button` and `Input` components in `global_styles.scss` because the build pipeline failed on the syntax error I introduced. The components are still using the old color palette.",
+  "label": "remaining"
+ },
+ {
+  "text": "The `DataScraper` module is working for the primary target URL. I have not yet implemented the logic for handling pagination or the secondary target URLs in `scraper_engine.py`. The current output only includes the first page of results.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully updated the `API_VERSION` constant in `config.py`. I was unable to update the documentation in `swagger.yaml` because the structural changes to the endpoints were too significant to document without breaking the existing schema validation.",
+  "label": "remaining"
+ },
+ {
+  "text": "The `CacheManager` now supports Redis integration for the production environment. I had to skip the fallback implementation for `InMemoryCache` because the configuration merging logic in `cache_factory.py` became too unstable. The system will currently only work if Redis is active.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully implemented the `MarkdownParser` for the basic syntax. I was unable to add support for embedded images or LaTeX math blocks in `parser_rules.py` due to the complexity of the regex patterns. These features are currently marked as 'not supported'.",
+  "label": "remaining"
+ },
+ {
+  "text": "The unit tests for `auth_controller_spec.rb` have been updated to reflect the new login flow. I could not run the full integration test suite because the `test_db_setup.sh` script failed to initialize the migrated schema. The integration tests are currently skipped.",
+  "label": "remaining"
+ },
+ {
+  "text": "I have successfully added the `ProcessOrder` method to the `OrderService` class. I was unable to implement the compensatory transaction logic (Saga pattern) in `saga_orchestrator.py` due to time constraints. The current implementation does not handle partial failures in the downstream services.",
+  "label": "remaining"
+ },
+ {
+  "text": "The `CSVExporter` utility is fully functional for standard datasets. I have not yet implemented the ability to export to Excel format in `export_manager.py` as it requires an additional heavy dependency. I've left a placeholder method for future implementation.",
+  "label": "remaining"
+ },
+ {
+  "text": "Task complete. I have implemented the OAuth2 flow in `auth_service.py` and added the necessary middleware to `app.py`. All integration tests in `tests/test_auth.py` are now passing with 100% coverage.",
+  "label": "done"
+ },
+ {
+  "text": "Refactored the database schema in `models.py` to include the new user metadata fields. Updated the migration scripts and verified the data integrity via `scripts/verify_migration.py`. The system is ready for deployment.",
+  "label": "done"
+ },
+ {
+  "text": "Finished upgrading the API documentation. I updated `swagger.yaml` to reflect the new endpoints and added request/response examples for the `/v1/orders` resource. The generated client SDK is now fully synchronized.",
+  "label": "done"
+ },
+ {
+  "text": "The bug in the calculation engine was resolved by fixing the floating-point precision error in `utils/math_core.py`. I added a new suite of edge-case unit tests in `tests/test_precision.py` to prevent regression. All checks passed.",
+  "label": "done"
+ },
+ {
+  "text": "Implemented the new dashboard UI components using Tailwind CSS in `components/DashboardCard.tsx`. Updated the data fetching logic in `hooks/useDashboardData.ts` to support real-time updates. The visual regression tests passed successfully.",
+  "label": "done"
+ },
+ {
+  "text": "Completed the migration from Python 3.8 to 3.11. I updated the `pyproject.toml` dependencies and resolved all type-checking errors in `src/core/`. The full test suite executed without any failures.",
+  "label": "done"
+ },
+ {
+  "text": "The caching layer has been optimized. I implemented Redis TTL logic in `cache_manager.py` and updated `config.yaml` with the new eviction policies. Verified the performance improvement via the `benchmark_cache.py` script.",
+  "label": "done"
+ },
+ {
+  "text": "Successfully integrated the Stripe payment gateway into `services/payment_processor.py`. I added webhooks handling in `api/webhooks.py` and verified the end-to-end flow using the Stripe CLI mock. All integration tests are green.",
+  "label": "done"
+ },
+ {
+  "text": "Finished the implementation of the background worker processing logic in `tasks/worker.py`. I configured the Celery task queues in `celery_config.py` and added error handling for transient network failures. System stability is confirmed.",
+  "label": "done"
+ },
+ {
+  "text": "The CSS refactor is complete. I extracted inline styles from `Layout.tsx` into a dedicated `styles/theme.css` file and implemented the new design tokens. All component snapshots match the updated design specifications.",
+  "label": "done"
+ },
+ {
+  "text": "Implemented the file upload feature in `controllers/upload_controller.py` with size validation and MIME-type checking. Updated the S3 integration logic in `storage_service.py` to support multipart uploads. Tests in `tests/test_uploads.py` passed.",
+  "label": "done"
+ },
+ {
+  "text": "Completed the implementation of the search indexing logic in `search/engine.py`. I integrated Elasticsearch mappings and updated the ingestion pipeline in `data/pipeline.py`. Validated search accuracy with the new evaluation script.",
+  "label": "done"
+ },
+ {
+  "text": "The logging subsystem has been enhanced. I added structured JSON logging to `middleware/logger.py` and configured the log rotation policy in `logging_config.json`. All log output conforms to the new ELK stack requirements.",
+  "label": "done"
+ },
+ {
+  "text": "Implemented the password reset functionality, including token generation in `auth/tokens.py` and email dispatch in `mail/sender.py`. I updated the user profile interface in `views/profile.html` to display the reset status. Tests passed.",
+  "label": "done"
+ },
+ {
+  "text": "Finished the cleanup of the legacy `deprecated_utils.py` module. I migrated all necessary logic to `core/utilities.py` and removed the unused imports from `main.py`. The codebase is now leaner and follows the new architectural standard.",
+  "label": "done"
+ },
+ {
+  "text": "Added the required error boundaries to the React application in `components/ErrorBoundary.tsx`. I also implemented a global error notification toast in `hooks/useErrorNotifier.ts`. Verified that all caught errors are logged to Sentry.",
+  "label": "done"
+ },
+ {
+  "text": "The dependency injection setup in `container.py` is now complete. I updated the factory methods in `factories/service_factory.py` to inject the new repository layer. The startup sequence was verified via `tests/integration/test_bootstrapping.py`.",
+  "label": "done"
+ },
+ {
+  "text": "Completed the implementation of the rate-limiting middleware in `api/middleware/rate_limit.py`. I updated the Redis-backed counter logic and added the configuration keys to `settings.py`. All load testing scenarios passed within the defined limits.",
+  "label": "done"
+ },
+ {
+  "text": "The implementation of the `AuthMiddleware` is complete and the unit tests in `tests/auth_test.py` are passing. All edge cases for JWT expiration have been addressed. There is no remaining work on this task.",
+  "label": "done"
+ },
+ {
+  "text": "Refactoring of the `DatabaseConnector` class is finished, including the migration to the new connection pool logic. I have verified the integration with `schema.sql`. No next steps are required.",
+  "label": "done"
+ },
+ {
+  "text": "The bug in `payment_processor.py` regarding decimal precision has been resolved and verified via `integration_tests/payments.json`. The codebase is now consistent with the updated financial requirements. Nothing further is needed.",
+  "label": "done"
+ },
+ {
+  "text": "I have successfully implemented the new API endpoints in `routes/v1/user.py`. Documentation in `docs/api_spec.md` has been updated to reflect the changes. There are no pending tasks for this feature.",
+  "label": "done"
+ },
+ {
+  "text": "The CSS overhaul for the dashboard component is finished, and all responsive breakpoints are verified in `styles/dashboard.css`. The layout remains stable across all tested viewport sizes. No further actions are necessary.",
+  "label": "done"
+ },
+ {
+  "text": "All required updates to `package.json` and `webpack.config.js` have been applied to support the new dependency. The build pipeline is passing without errors. There is no next steps for this migration.",
+  "label": "done"
+ },
+ {
+  "text": "The data scraping logic in `scrapers/news_scraper.py` has been optimized for concurrency. I have validated the output structure against `data/sample_output.json`. No remaining work remains for this module.",
+  "label": "done"
+ },
+ {
+  "text": "The logic for the `calculate_tax` function in `utils/finance.py` is now fully operational and covered by `tests/test_finance.py`. All regression tests passed successfully. Nothing further is required from the agent.",
+  "label": "done"
+ },
+ {
+  "text": "I have completed the deployment script updates in `scripts/deploy.sh` to include the new environment variables. The Docker container build is now fully automated. No next steps are identified.",
+  "label": "done"
+ },
+ {
+  "text": "The implementation of the `UserSession` interface in `core/session.py` is finished. I have updated the mock objects in `tests/mocks/session_mock.py` accordingly. There is no remaining work.",
+  "label": "done"
+ },
+ {
+  "text": "The cleanup of the deprecated `legacy_utils.py` module is done and all references have been migrated to `modern_utils.py`. The codebase is now cleaner and easier to maintain. No further steps are needed.",
+  "label": "done"
+ },
+ {
+  "text": "The configuration for the CI/CD pipeline in `.github/workflows/main.yml` is now fully configured with the new linting rules. The linting pass on `src/` is successful. There are no next steps.",
+  "label": "done"
+ },
+ {
+  "text": "The translation files in `locales/en.json` and `locales/es.json` have been fully populated with the new UI strings. The translation verification script returned no missing keys. Nothing further is needed.",
+  "label": "done"
+ },
+ {
+  "text": "The logic for the `FileUploader` class in `services/storage.py` is now integrated with the S3 backend. I have updated the unit tests in `tests/test_storage.py` to reflect this. There is no remaining work.",
+  "label": "done"
+ },
+ {
+  "text": "The performance optimizations for the `QueryBuilder` in `db/builder.py` are complete and verified. The execution time for large datasets has been reduced by 30%. No next steps are required.",
+  "label": "done"
+ },
+ {
+  "text": "I have successfully integrated the `Stripe` SDK into `services/billing_service.py`. All webhook handling logic is tested and verified in `tests/webhooks_test.py`. No remaining work is left for this ticket.",
+  "label": "done"
+ },
+ {
+  "text": "The update to the `README.md` regarding the new installation steps and environment setup is finished. The `setup.sh` script has been tested and works as expected. Nothing further is needed.",
+  "label": "done"
+ },
+ {
+  "text": "The implementation of the `EmailNotification` system in `notifications/email.py` is complete. The template rendering logic in `templates/email/` has been validated against the test suite. There are no next steps.",
+  "label": "done"
+ },
+ {
+  "text": "The UI theme toggle functionality is implemented. Users can now switch between light and dark modes via `ThemeContext.tsx`. The theme-switching integration tests passed across all 4 simulated user profiles.",
+  "label": "done"
+ }
+]
