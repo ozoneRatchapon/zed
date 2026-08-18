@@ -46,40 +46,74 @@ struct Example {
     label: String,
 }
 
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+#[inline]
+fn fnv1a_step(mut hash: u64, byte: u8) -> u64 {
+    hash ^= byte as u64;
+    hash.wrapping_mul(FNV_PRIME)
+}
+
+/// Plain FNV-1a over raw bytes. The hot path uses [`hash_word`] and
+/// [`hash_bigram`], which fold lowercasing in; this stays as the reference the
+/// tests pin those two against.
+#[cfg(test)]
 fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
+    bytes.iter().fold(FNV_OFFSET, |h, &b| fnv1a_step(h, b))
+}
+
+/// Hash of an ASCII-lowercased word.
+#[inline]
+fn hash_word(word: &[u8]) -> u64 {
+    word.iter()
+        .fold(FNV_OFFSET, |h, &b| fnv1a_step(h, b.to_ascii_lowercase()))
+}
+
+/// Hash of `"{a}_{b}"` lowercased, streamed rather than built.
+///
+/// FNV-1a is a rolling hash, so feeding `a`, then `b'_'`, then `b` is
+/// bit-identical to hashing the concatenation — asserted by
+/// `bigram_hash_matches_concatenation`. That identity is what lets this skip
+/// the per-bigram `String` without moving any centroid.
+#[inline]
+fn hash_bigram(a: &[u8], b: &[u8]) -> u64 {
+    let h = a
+        .iter()
+        .fold(FNV_OFFSET, |h, &c| fnv1a_step(h, c.to_ascii_lowercase()));
+    let h = fnv1a_step(h, b'_');
+    b.iter()
+        .fold(h, |h, &c| fnv1a_step(h, c.to_ascii_lowercase()))
 }
 
 /// Hash word unigrams and adjacent bigrams into an L2-normalised vector.
 ///
-/// Allocation-free apart from the lowercase/split scratch: the vector itself
-/// is a fixed-size array, so classification never touches the heap for it.
+/// Allocation-free: words are ASCII-alphanumeric runs located by index in the
+/// source string, hashed in place with lowercasing applied per byte, and the
+/// only storage is the fixed-size return array. Non-ASCII bytes act as
+/// separators, matching the previous `char`-based cleaning pass.
 fn features(text: &str) -> [f32; DIM] {
     let mut v = [0.0f32; DIM];
-    // Split on anything that is not ASCII alphanumeric, lowercased.
-    let cleaned: String = text
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect();
-    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    let bytes = text.as_bytes();
+    let mut prev: Option<(usize, usize)> = None;
+    let mut i = 0usize;
 
-    for w in &words {
-        v[(fnv1a(w.as_bytes()) % DIM as u64) as usize] += 1.0;
-    }
-    for pair in words.windows(2) {
-        let gram = format!("{}_{}", pair[0], pair[1]);
-        v[(fnv1a(gram.as_bytes()) % DIM as u64) as usize] += 1.0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_alphanumeric() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
+            i += 1;
+        }
+        let word = &bytes[start..i];
+
+        v[(hash_word(word) % DIM as u64) as usize] += 1.0;
+        if let Some((ps, pe)) = prev {
+            v[(hash_bigram(&bytes[ps..pe], word) % DIM as u64) as usize] += 1.0;
+        }
+        prev = Some((start, i));
     }
 
     normalise(&mut v);
@@ -138,6 +172,24 @@ fn centroids() -> &'static Centroids {
     })
 }
 
+/// Words as [`features`] counts them: runs of ASCII alphanumerics.
+fn count_words(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_alphanumeric() {
+            n += 1;
+            while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    n
+}
+
 /// Whether the message looks like it left unfinished work.
 ///
 /// `None` means "outside what this classifier has evidence for" — an empty
@@ -148,7 +200,7 @@ pub fn indicates_remaining_work(message: &str) -> Option<bool> {
     if message.trim().is_empty() {
         return None;
     }
-    let word_count = message.split_whitespace().count();
+    let word_count = count_words(message);
     if word_count < MIN_WORDS {
         return None;
     }
@@ -251,6 +303,32 @@ mod tests {
         assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv1a(b"foobar"), 0x85944171f73967e8);
+    }
+
+    #[test]
+    fn bigram_hash_matches_concatenation() {
+        // The streamed bigram hash must equal hashing the built string, or the
+        // committed centroids no longer describe the same feature space.
+        for (a, b) in [
+            ("migration", "failed"),
+            ("Tests", "PASS"),
+            ("a", "b"),
+            ("connection", "timeout"),
+        ] {
+            let built = fnv1a(format!("{}_{}", a.to_lowercase(), b.to_lowercase()).as_bytes());
+            assert_eq!(hash_bigram(a.as_bytes(), b.as_bytes()), built, "{a}_{b}");
+        }
+    }
+
+    #[test]
+    fn word_count_matches_feature_tokenisation() {
+        assert_eq!(count_words("hello world"), 2);
+        assert_eq!(count_words("  a, b; c!  "), 3);
+        // Underscores and dots are separators, not word characters, so a path
+        // splits: tests / auth / test / py.
+        assert_eq!(count_words("tests/auth_test.py passes"), 5);
+        assert_eq!(count_words(""), 0);
+        assert_eq!(count_words("—— ??"), 0);
     }
 
     #[test]

@@ -26,3 +26,9 @@ paths.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "remaining_work_bench"
+harness = false

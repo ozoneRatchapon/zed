@@ -130,3 +130,52 @@ centroid for long and implicit — which is the fusion a Super-GOAT claim would 
 
 **Still not default-on, and still not wired in.** Next: criterion bench (G2), kill the per-bigram
 allocation (G4), harvest real session messages including short ones (G5).
+
+---
+
+## Addendum 2 — G2 and G4 closed
+
+**G4 — allocation removed.** `features` no longer builds a cleaned `String`, a `Vec<&str>` of
+words, or a `String` per bigram. It walks the input once, locating ASCII-alphanumeric runs by
+index and hashing them in place with lowercasing folded into the fold step. The only storage is
+the fixed `[f32; 1024]` return array, so classification never touches the heap.
+
+The bigram hash is now streamed (`a`, then `b'_'`, then `b`) instead of hashing a built
+`"{a}_{b}"`. FNV-1a is a rolling hash, so the two are bit-identical — pinned by
+`bigram_hash_matches_concatenation`, which is what makes this an optimisation rather than a
+retrain: **the committed centroids describe exactly the same feature space as before.**
+
+**G2 — measured** (criterion, `cargo bench -p auto_prompt`, M5 Pro):
+
+| Input | Time |
+|---|---|
+| typical stop-message (46 words) | **2.16 µs** |
+| long stop-message (92 words) | **2.59 µs** |
+| short message (abstains via `MIN_WORDS`) | **5.57 ns** |
+
+The Python prototype's 164 µs quoted above was 76x pessimistic; do not cite it. In context:
+
+| Path | Cost per agent stop |
+|---|---|
+| keyword scan (current) | ~3 µs (Python-measured; same order) |
+| **centroid (this module)** | **2.2 µs** |
+| local tier LLM call (T1, thinking off) | ~200,000 µs |
+| cloud orchestration call | ~1,000,000+ µs |
+
+So the centroid is roughly free next to the keyword scan it would join, and ~90,000x cheaper
+than the T1 call it can pre-empt. Scaling is sub-linear in message length (2x the words for
+1.2x the time) because the abstain check and normalisation are fixed cost.
+
+### GOAT status after addendum 2
+
+- **G1 correctness** — ✅ deterministic; hash pinned to reference vectors; bigram identity pinned.
+- **G2 perf** — ✅ 2.16 µs typical, criterion-measured.
+- **G3 no-regression** — ✅ 178 passed, 0 failed, clippy clean. `detect_remaining_work` untouched.
+- **G4 alloc-free** — ✅ no heap allocation on the classification path.
+- **G5 quality** — ⚠️ **the one gate still open.** Single-generator corpus, n=60, and no data at
+  all below 24 words.
+
+**G5 is now the only thing between this and a promotion decision**, and it needs real session
+data rather than more synthetic messages. The union with the keyword matcher (keyword for short
+and explicit, centroid for long and implicit) should be measured in the same pass — that union,
+not this module alone, is what a Super-GOAT claim would rest on.
