@@ -10,6 +10,7 @@ mod config;
 pub mod context;
 pub mod handover;
 pub mod local_mlx;
+pub mod remaining_work;
 pub mod routing;
 
 pub use config::AutoPromptConfig;

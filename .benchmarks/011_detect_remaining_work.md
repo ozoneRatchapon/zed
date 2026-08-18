@@ -72,3 +72,61 @@ not precise.
 
 **Recommendation: not yet default-on.** Port to Rust behind a config flag, re-measure on real
 session data, then decide.
+
+---
+
+## Addendum (same day) — Rust port, and a coverage gap this benchmark had
+
+Ported to `crates/auto_prompt/src/remaining_work.rs`. Two changes from the prototype:
+
+**FNV-1a instead of BLAKE2b.** The crate has no hashing dependency, and `DefaultHasher` is
+explicitly not stable across Rust releases — the centroids are derived from the hash, so a
+change would silently invalidate them. FNV-1a is written out in the module and pinned by a
+test against reference vectors. Re-running the sweep under FNV also moved the numbers:
+
+| DIM | acc | prec | rec | F1 | FP / FN |
+|---|---|---|---|---|---|
+| 128 | 0.717 | 0.676 | 0.833 | 0.746 | 12 / 5 |
+| 256 | 0.783 | 0.743 | 0.867 | 0.800 | 9 / 4 |
+| 512 | 0.867 | 0.806 | 0.967 | 0.879 | 7 / 1 |
+| **1024** | **0.917** | **0.857** | **1.000** | **0.923** | **5 / 0** |
+| 2048 | 0.900 | 0.853 | 0.967 | 0.906 | 5 / 1 |
+| 512, unigrams only | 0.817 | 0.732 | 1.000 | 0.845 | 11 / 0 |
+
+DIM=1024 is the pick. Note the gap between the BLAKE2b run (0.850) and the FNV run (0.917) at
+the same width is pure bucket-collision luck — at n=60 that difference is noise, not a reason
+to prefer either hash on quality.
+
+**The gap: this benchmark never tested short messages.** A unit test written against the port
+failed on a 15-word completion ("Done — the endpoint now returns the correct status code and
+the regression test covers it."), which scored +0.02 *toward* "remaining" — wrong, on a margin
+indistinguishable from noise. Checking the corpus explains it: the shortest training example is
+**24 words** (median 32) and the held-out set contains nothing under 25. Every number in the
+table above therefore describes messages of ≥25 words only, and says nothing about the short
+ones real agents certainly emit.
+
+Accuracy by length on the held-out set: 25–49 words **0.912** (52/57), ≥50 words **1.000** (3/3),
+under 25 words **no data**.
+
+The port answers this by abstaining rather than bluffing: `indicates_remaining_work` returns
+`Option<bool>`, with `None` for empty input or anything under `MIN_WORDS = 24`. Callers fall
+back to the keyword path, which reads short explicit statements perfectly well. That also
+suggests the eventual shape is a **union** of the two — keyword for short and explicit,
+centroid for long and implicit — which is the fusion a Super-GOAT claim would need to prove.
+
+### GOAT status after the port
+
+- **G1 correctness** — ✅ deterministic (no RNG, no clock, no network); hash pinned by test;
+  7 unit tests including the real held-out false-negative cases.
+- **G2 perf** — ⬜ still unmeasured in Rust. The Python prototype's 164 µs is not the number to
+  quote; needs a criterion bench before the gate is claimable.
+- **G3 no-regression** — ✅ 176 passed, 0 failed, clippy clean. `detect_remaining_work` is
+  **untouched** — the module is not wired in yet.
+- **G4 alloc-free** — ⚠️ the feature vector is a fixed `[f32; 1024]` on the stack, but bigram
+  extraction still allocates a `String` per pair and a `Vec<&str>` per message. Fixable with a
+  streaming hash over the word pair; not done.
+- **G5 quality** — ⚠️ the table above, subject to the single-generator caveat and now the
+  explicit short-message blind spot.
+
+**Still not default-on, and still not wired in.** Next: criterion bench (G2), kill the per-bigram
+allocation (G4), harvest real session messages including short ones (G5).
