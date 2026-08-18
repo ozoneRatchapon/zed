@@ -179,3 +179,59 @@ than the T1 call it can pre-empt. Scaling is sub-linear in message length (2x th
 data rather than more synthetic messages. The union with the keyword matcher (keyword for short
 and explicit, centroid for long and implicit) should be measured in the same pass — that union,
 not this module alone, is what a Super-GOAT claim would rest on.
+
+---
+
+## Addendum 3 — shadow mode, for closing G5 on real data
+
+G5 cannot be closed with more synthetic messages: the corpus has one generator, n=60, and
+nothing under 24 words. It needs stop-messages from real sessions.
+
+`write_remaining_work_shadow_log` records, on every orchestration decision, what **both**
+classifiers would have said — without acting on either. It is pure observation: the evaluation
+path is untouched, and `detect_remaining_work` remains the only thing with a vote.
+
+Enable it for a stretch of real work:
+
+```sh
+ZED_AUTO_PROMPT_SHADOW_REMAINING_WORK=1
+```
+
+Rows land in `<project>/.logs/remaining_work_shadow.jsonl`, beside the existing decision logs:
+
+```json
+{"timestamp":"…","words":46,"keyword":false,"centroid":true,"agree":false,"message":"…"}
+```
+
+`centroid` is `null` where the classifier abstained (under `MIN_WORDS`). The message body is
+recorded verbatim because labelling needs it — the same posture as the decision logs, which
+already store the full serialized context.
+
+### What to do with the rows
+
+**Only the disagreements need labelling.** Where both agree, neither classifier changes the
+outcome. Filter with:
+
+```sh
+jq -c 'select(.agree == false)' .logs/remaining_work_shadow.jsonl
+```
+
+Then, for each, mark whether work genuinely remained. That yields the first real-session corpus,
+and answers three things the synthetic set cannot:
+
+1. **Does the recall gain survive real phrasing**, or was the centroid learning gemma4's style?
+2. **How often are stop-messages under 24 words** — i.e. how much of real traffic the centroid
+   abstains on, which decides whether the union is worth building at all.
+3. **What the real base rate is.** The synthetic set is 50/50 by construction; if real sessions
+   are 90% "genuinely done", precision matters far more than the balanced numbers suggest, and
+   the current 0.857 may not be good enough despite the recall win.
+
+Rows where `centroid` is `null` are the short-message population that benchmark 011 has no data
+on. Counting them is the cheapest useful result here, and needs no labelling at all.
+
+### G5 exit criteria
+
+Enough labelled disagreements to compare keyword / centroid / **union** on real messages, with
+the base rate measured rather than assumed. The union — keyword for short and explicit, centroid
+for long and implicit — is the configuration a Super-GOAT claim would rest on, so it should be
+measured in the same pass rather than after.

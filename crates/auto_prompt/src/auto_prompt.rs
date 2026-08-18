@@ -1050,6 +1050,14 @@ pub async fn decide_with_llm(
         input.next_plan_prompt.is_some()
     );
 
+    // Shadow comparison for benchmark 011 / GOAT G5: record what the modelless
+    // classifier WOULD have said next to what the keyword matcher says, without
+    // acting on either. Pure observation — the evaluation below is unchanged.
+    write_remaining_work_shadow_log(
+        data.project_root.as_ref(),
+        data.last_assistant_message.as_deref(),
+    );
+
     let evaluation = evaluate_response(&input);
 
     log::info!(
@@ -1525,6 +1533,70 @@ pub async fn decide_with_llm(
                 }
             }
         }
+    }
+}
+
+/// Append one shadow-comparison record for the remaining-work classifiers.
+///
+/// Off unless `ZED_AUTO_PROMPT_SHADOW_REMAINING_WORK=1`, following the env-override
+/// convention of the timeout/threshold settings. When on, appends JSONL to
+/// `<project>/.logs/remaining_work_shadow.jsonl`:
+///
+/// ```json
+/// {"timestamp":"…","words":46,"keyword":false,"centroid":true,"agree":false,"message":"…"}
+/// ```
+///
+/// `centroid` is `null` when the classifier abstains (message under its
+/// minimum length). Rows where the two disagree are the ones worth labelling —
+/// they are exactly the cases that decide whether the centroid is worth
+/// promoting, and the corpus in benchmark 011 has none of them from real
+/// sessions.
+///
+/// The message body is recorded verbatim because labelling needs it; it is
+/// written beside the existing decision logs, which already contain the full
+/// serialized context.
+fn write_remaining_work_shadow_log(project_root: Option<&PathBuf>, message: Option<&str>) {
+    if std::env::var("ZED_AUTO_PROMPT_SHADOW_REMAINING_WORK").as_deref() != Ok("1") {
+        return;
+    }
+    let Some(msg) = message else {
+        return;
+    };
+    if msg.trim().is_empty() {
+        return;
+    }
+
+    let keyword = detect_remaining_work(Some(msg)).is_some();
+    let centroid = remaining_work::indicates_remaining_work(msg);
+    let agree = centroid.map(|c| c == keyword);
+
+    let record = serde_json::json!({
+        "timestamp": chrono::Local::now().to_rfc3339(),
+        "words": msg.split_whitespace().count(),
+        "keyword": keyword,
+        "centroid": centroid,
+        "agree": agree,
+        "message": msg,
+    });
+
+    let logs_dir = match project_root {
+        Some(root) => root.join(".logs"),
+        None => PathBuf::from(FALLBACK_LOG_DIR),
+    };
+    if let Err(err) = std::fs::create_dir_all(&logs_dir) {
+        log::warn!("auto_prompt: shadow log: cannot create .logs dir: {err}");
+        return;
+    }
+
+    let path = logs_dir.join("remaining_work_shadow.jsonl");
+    let line = format!("{record}\n");
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    if let Err(err) = appended {
+        log::warn!("auto_prompt: shadow log: cannot append to {path:?}: {err}");
     }
 }
 
@@ -3492,6 +3564,51 @@ mod tests {
             is_synthetic_failure: false,
             stop_phase: context::StopPhase::Working,
         }
+    }
+
+    // --- remaining-work shadow log (benchmark 011 / G5 harvest) ---
+
+    /// Both phases live in ONE test on purpose: they mutate the same process-wide
+    /// env var, so as separate `#[test]`s they would race under the parallel
+    /// harness and flake.
+    #[test]
+    fn shadow_log_is_opt_in_and_records_both_verdicts() {
+        let dir = std::env::temp_dir().join("auto_prompt_shadow_test");
+        let log_path = dir.join(".logs/remaining_work_shadow.jsonl");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Long, keyword-free description of unfinished work: the class the
+        // keyword matcher misses and the centroid is meant to catch.
+        let msg = "The API endpoints for the product catalog are functional, though the \
+             integration with the Redis cache layer is incomplete. I managed to update \
+             routes/products.py, but the caching decorator is currently missing from the \
+             get_product function. The latency benefits will not be visible until that \
+             logic is applied.";
+
+        // Phase 1 — off by default.
+        unsafe { std::env::remove_var("ZED_AUTO_PROMPT_SHADOW_REMAINING_WORK") };
+        write_remaining_work_shadow_log(Some(&dir), Some(msg));
+        assert!(
+            !log_path.exists(),
+            "shadow log must stay off without the env var"
+        );
+
+        // Phase 2 — on, and recording both verdicts.
+        unsafe { std::env::set_var("ZED_AUTO_PROMPT_SHADOW_REMAINING_WORK", "1") };
+        write_remaining_work_shadow_log(Some(&dir), Some(msg));
+        unsafe { std::env::remove_var("ZED_AUTO_PROMPT_SHADOW_REMAINING_WORK") };
+
+        let body = std::fs::read_to_string(&log_path).expect("shadow log should exist when enabled");
+        let row: serde_json::Value =
+            serde_json::from_str(body.lines().next().expect("one row")).expect("valid json");
+
+        assert_eq!(row["keyword"], serde_json::json!(false), "keyword misses it");
+        assert_eq!(row["centroid"], serde_json::json!(true), "centroid catches it");
+        assert_eq!(row["agree"], serde_json::json!(false));
+        assert!(row["words"].as_u64().unwrap() >= 24);
+        assert!(row["message"].as_str().unwrap().contains("Redis"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- Task 4: evaluate_response() state machine tests ---
