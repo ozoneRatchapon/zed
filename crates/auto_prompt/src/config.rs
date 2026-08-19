@@ -196,6 +196,18 @@ impl Default for LocalRoutingConfig {
             // — so both tiers share ONE already-running server instead of two
             // mlx_lm.server processes on 8081/8082. Verified against Ollama
             // 0.32.13 with the exact body local_mlx::call sends.
+            //
+            // CAVEAT (measured 2026-08-19): that endpoint caps the prompt at
+            // Ollama's default num_ctx (16387 tokens observed) and drops the
+            // rest silently — `options.num_ctx`, top-level `num_ctx` and
+            // `context_length` are all no-ops there; only the native /api/chat
+            // route honours them. Orchestration contexts above roughly 60k
+            // chars will therefore be trimmed. local_mlx detects this and
+            // returns Err so the router escalates rather than acting on a
+            // partial context, and plan 010's lightweight-context threshold
+            // keeps most calls under the cap — but if you see frequent
+            // "server truncated the context" warnings, lower that threshold or
+            // point these tiers at mlx_lm.server instead.
             t1: TierConfig {
                 endpoint: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen3:0.6b".into(),

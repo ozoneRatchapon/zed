@@ -91,6 +91,27 @@ pub async fn call(
     let resp_json: serde_json::Value =
         serde_json::from_slice(&resp_bytes).context("local_mlx: parse response JSON")?;
 
+    // Refuse a verdict the server reached on a truncated prompt.
+    //
+    // Ollama's OpenAI-compatible surface hard-caps the prompt at its default
+    // num_ctx and drops the overflow SILENTLY — no error, no warning, and every
+    // documented way of raising it is ignored on this endpoint (`options.num_ctx`,
+    // top-level `num_ctx`, `context_length` all measured as no-ops; the prompt
+    // still lands at 16387 tokens). Only the native /api/chat route honours it.
+    // A decision made on a truncated orchestration context is worse than no
+    // decision, so return Err and let the router escalate.
+    if let Some(reported) = resp_json["usage"]["prompt_tokens"].as_u64() {
+        let sent_chars = (system_prompt.len() + context_json.len()) as u64;
+        if let Some(floor) = truncation_floor_tokens(sent_chars)
+            && reported < floor
+        {
+            anyhow::bail!(
+                "local_mlx: {url} reported {reported} prompt tokens for {sent_chars} chars sent \
+                 (floor {floor}) — the server truncated the context, so its verdict is unusable"
+            );
+        }
+    }
+
     let text = resp_json["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| {
@@ -109,4 +130,57 @@ pub async fn call(
     // parse_response synthesizes a confidence-0 stop (escalates naturally).
     let parsed = crate::parse_response(&text)?;
     Ok((text, parsed))
+}
+
+/// Fewest prompt tokens a server could honestly report for `sent_chars`.
+///
+/// English prose runs about 4 chars/token, so 8 is a deliberately generous
+/// floor — roughly half the expected count — chosen so ordinary tokeniser
+/// variation never trips the check and only genuine dropping does.
+///
+/// Returns `None` for small payloads, where the ratio is noisy (short prompts
+/// carry proportionally more punctuation and markup) and truncation is not a
+/// risk worth flagging anyway.
+fn truncation_floor_tokens(sent_chars: u64) -> Option<u64> {
+    const MIN_CHARS_TO_CHECK: u64 = 20_000;
+    const GENEROUS_CHARS_PER_TOKEN: u64 = 8;
+    (sent_chars >= MIN_CHARS_TO_CHECK).then(|| sent_chars / GENEROUS_CHARS_PER_TOKEN)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_payloads_are_not_checked() {
+        assert_eq!(truncation_floor_tokens(0), None);
+        assert_eq!(truncation_floor_tokens(19_999), None);
+    }
+
+    #[test]
+    fn floor_is_half_the_expected_token_count() {
+        // 80k chars is ~20k tokens at 4 chars/token; the floor sits at 10k so
+        // normal variation passes and only real dropping fails.
+        assert_eq!(truncation_floor_tokens(80_000), Some(10_000));
+    }
+
+    #[test]
+    fn catches_the_measured_ollama_v1_truncation() {
+        // Measured 2026-08-19: ~180k chars of context sent to Ollama's
+        // /v1/chat/completions came back reporting 16387 prompt tokens, with
+        // the planted fact dropped and the answer wrong.
+        let floor = truncation_floor_tokens(180_000).expect("large payload is checked");
+        assert!(
+            16_387 < floor,
+            "16387 tokens for 180k chars must read as truncated (floor {floor})"
+        );
+    }
+
+    #[test]
+    fn honest_full_context_passes() {
+        // Same content through the native API reported 54190 tokens — well
+        // above the floor, so the guard must not fire.
+        let floor = truncation_floor_tokens(180_000).expect("large payload is checked");
+        assert!(54_190 >= floor, "an honest full-context reply must pass");
+    }
 }
